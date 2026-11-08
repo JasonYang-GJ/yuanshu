@@ -42,6 +42,7 @@ internal static partial class Program
     private const string SpeechResetInput = "请介绍月球环形山。";
     private const string SnapshotReplacementInput = "请介绍北极星的位置。";
     private const string AfterSpeechResetInput = "请解释闪电形成的原因。";
+    private const string AfterCallInput = "我在学习，请解释海浪形成的原因。";
     private static readonly JsonSerializerOptions ResultJson = new(JsonSerializerDefaults.Web);
 
     [STAThread]
@@ -70,7 +71,8 @@ internal static partial class Program
         try
         {
             Require(args.Length is 1 or 2 or 3 && File.Exists(args[0]), "fake_codex_missing");
-            if (args.Length >= 2 && args[1] is not ("--voice-segments" or "--first-voice-reply")) Require(File.Exists(args[1]), "island_executable_missing");
+            if (args.Length >= 2 && args[1] is not ("--voice-segments" or "--visual-consent-routing" or "--first-voice-reply" or "--direct-call")
+                && !IsStartupVoiceScenario(args[1])) Require(File.Exists(args[1]), "island_executable_missing");
             if (args.Length == 3) Require(args[2] is "--drag-placement" or "--execution-progress", "unknown_scenario");
             Directory.CreateDirectory(dataRoot);
             application = new Application
@@ -145,11 +147,20 @@ internal static partial class Program
             {
                 try
                 {
+                    if (args.Length == 2 && IsStartupVoiceScenario(args[1]))
+                        return await RunStartupVoiceScenarioAsync(application, window, voice,
+                            submissionDelay, args[1]).ConfigureAwait(false);
                     if (args.Length == 2 && args[1] == "--first-voice-reply")
                         return await RunFirstVoiceReplyScenarioAsync(application, window, api, voice,
                             speech, submissionDelay).ConfigureAwait(false);
+                    if (args.Length == 2 && args[1] == "--direct-call")
+                        return await RunDirectCallScenarioAsync(application, window, api, voice,
+                            provider, speech, submissionDelay).ConfigureAwait(false);
                     if (args.Length == 2 && args[1] == "--voice-segments")
                         return await RunVoiceSegmentsScenarioAsync(application, window, voice).ConfigureAwait(false);
+                    if (args.Length == 2 && args[1] == "--visual-consent-routing")
+                        return await RunVisualConsentRoutingScenarioAsync(application, window, voice,
+                            submissionDelay).ConfigureAwait(false);
                     if (args.Length == 3 && args[2] == "--execution-progress")
                         return await RunExecutionProgressScenarioAsync(application, window, api, voice,
                             provider, speech, submissionDelay, args[1]).ConfigureAwait(false);
@@ -170,9 +181,9 @@ internal static partial class Program
                 }
                 finally
                 {
-                    shutdownOutcome.TrySetResult(await RequestNaturalShutdownAsync(
-                        application,
-                        window).ConfigureAwait(false));
+                    shutdownOutcome.TrySetResult(args.Length == 2 && args[1] == "--startup-exit"
+                        && (application.Dispatcher.HasShutdownStarted || application.Dispatcher.HasShutdownFinished)
+                        || await RequestNaturalShutdownAsync(application, window).ConfigureAwait(false));
                 }
             });
 
@@ -227,6 +238,20 @@ internal static partial class Program
         stopwatch.Stop();
         if (failure is null && evidence is not null && naturalShutdown && cleanupCompleted)
         {
+            if (evidence is DirectCallEvidence callEvidence)
+            {
+                Console.Out.WriteLine("SCREEN_GUIDE_DIRECT_CALL_RESULT " + JsonSerializer.Serialize(
+                    new { stage = "completed", callEvidence, naturalShutdown, cleanupCompleted,
+                        elapsedMilliseconds = stopwatch.ElapsedMilliseconds }, ResultJson));
+                return 0;
+            }
+            if (evidence is StartupVoiceEvidence startupEvidence)
+            {
+                Console.Out.WriteLine("SCREEN_GUIDE_STARTUP_VOICE_RESULT " + JsonSerializer.Serialize(
+                    new { stage = "completed", startupEvidence, naturalShutdown, cleanupCompleted,
+                        elapsedMilliseconds = stopwatch.ElapsedMilliseconds }, ResultJson));
+                return 0;
+            }
             if (evidence is FirstVoiceReplyEvidence firstVoiceEvidence)
             {
                 Console.Out.WriteLine("SCREEN_GUIDE_FIRST_VOICE_REPLY_RESULT " + JsonSerializer.Serialize(
@@ -245,6 +270,13 @@ internal static partial class Program
             {
                 Console.Out.WriteLine("SCREEN_GUIDE_VOICE_SEGMENTS_RESULT " + JsonSerializer.Serialize(
                     new { stage = "completed", segmentsEvidence, naturalShutdown, cleanupCompleted,
+                        elapsedMilliseconds = stopwatch.ElapsedMilliseconds }, ResultJson));
+                return 0;
+            }
+            if (evidence is VisualConsentRoutingEvidence consentEvidence)
+            {
+                Console.Out.WriteLine("SCREEN_GUIDE_VISUAL_CONSENT_ROUTING_RESULT " + JsonSerializer.Serialize(
+                    new { stage = "completed", consentEvidence, naturalShutdown, cleanupCompleted,
                         elapsedMilliseconds = stopwatch.ElapsedMilliseconds }, ResultJson));
                 return 0;
             }
@@ -1206,9 +1238,15 @@ internal static partial class Program
             null, null, null, null, null, null, true, false, null, null, now, now, null,
             "OpenApplication", SelectedActionTarget, SelectedActionTarget);
         delay.SelectedActionPlan = actionBase with { ForegroundTurn = fakeTurn, Turns = [.. actionBase.Turns, fakeTurn] };
+        // Background polling before submission is not evidence that the action
+        // reached its planning wait. Keep this race deterministic in the harness.
+        var earlyPoll = ((IDesktopApiClient)delay).GetCurrentSessionAsync();
+        Require(!delay.SelectedActionPlanHeld.Task.IsCompleted, "selected_action_plan_gate_fired_before_submission");
+        await earlyPoll.WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false);
         var selectedAction = await application.Dispatcher.InvokeAsync(() => (Task)typeof(MainWindow)
             .GetMethod("ExecuteDesktopActionAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(window, ["启动受控测试应用", "OpenApplication", SelectedActionTarget])!).Task.ConfigureAwait(false);
+        await delay.SelectedActionSubmitted.Task.WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false);
         await delay.SelectedActionPlanHeld.Task.WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false);
         await application.Dispatcher.InvokeAsync(() => typeof(MainWindow)
             .GetMethod("StopVoiceButton_Click", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -1509,6 +1547,9 @@ internal static partial class Program
 
     private class DelayedSubmissionApi : DispatchProxy
     {
+        public TaskCompletionSource? StartupDashboardGate { get; set; }
+        public TaskCompletionSource StartupDashboardRequested { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int StartupDashboardRequests;
         public Action<SessionInputRequestDto>? BeforeSubmission { get; set; }
         public IDesktopApiClient Inner { get; set; } = null!;
         public bool DelayNextVoice { get; set; }
@@ -1529,11 +1570,13 @@ internal static partial class Program
         public TaskCompletionSource NewSessionReplyHeld { get; private set; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ReleaseNewSessionReply { get; private set; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public SessionSnapshotDto? SelectedActionPlan { get; set; }
+        public TaskCompletionSource SelectedActionSubmitted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource SelectedActionPlanHeld { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ReleaseSelectedActionPlan { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public ConcurrentQueue<string> SubmittedTexts { get; } = new();
         public ConcurrentQueue<Guid> CancelledTurns { get; } = new();
         public ConcurrentQueue<Guid> ConfirmedTurns { get; } = new();
+        public ConcurrentQueue<Guid> WindowConsentTurns { get; } = new();
         public ConcurrentQueue<Guid> ProvidedProjectTurns { get; } = new();
         public TaskCompletionSource ReceiptHeld { get; private set; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ReleaseReceipt { get; private set; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1557,6 +1600,10 @@ internal static partial class Program
         }
         protected override object? Invoke(MethodInfo? method, object?[]? args)
         {
+            if (method!.Name == nameof(IDesktopApiClient.RespondSessionWindowConsentAsync) && args?[1] is Guid consentTurn)
+                WindowConsentTurns.Enqueue(consentTurn);
+            if (method!.Name == nameof(IDesktopApiClient.GetDashboardAsync) && StartupDashboardGate is not null)
+                return HoldStartupDashboardAsync(args is [CancellationToken startupToken] ? startupToken : default);
             if (method!.Name == nameof(IDesktopApiClient.ProvideSessionProjectAsync) && args?[1] is Guid projectTurn)
                 ProvidedProjectTurns.Enqueue(projectTurn);
             if (method!.Name == nameof(IDesktopApiClient.CancelSessionTurnAsync) && args?[1] is Guid turnId)
@@ -1575,7 +1622,8 @@ internal static partial class Program
                 ConfirmedTurns.Enqueue(confirmedTurn);
                 if (SelectedActionPlan?.ForegroundTurn?.Id == confirmedTurn) return Task.FromResult(SelectedActionPlan);
             }
-            if (method.Name == nameof(IDesktopApiClient.GetCurrentSessionAsync) && SelectedActionPlan is { } selectedPlan)
+            if (method.Name == nameof(IDesktopApiClient.GetCurrentSessionAsync)
+                && SelectedActionSubmitted.Task.IsCompleted && SelectedActionPlan is { } selectedPlan)
                 return HoldSelectedActionPlanAsync(selectedPlan);
             if (method.Name == nameof(IDesktopApiClient.StartNewSessionAsync))
             {
@@ -1604,7 +1652,10 @@ internal static partial class Program
                     return HoldBeforeRegistrationAsync(request, args[1] is CancellationToken inputToken ? inputToken : default);
                 }
                 if (request.ExpectedTarget == SelectedActionTarget && SelectedActionPlan is { } plan)
+                {
+                    SelectedActionSubmitted.TrySetResult();
                     return Task.FromResult(new SessionTurnCommandResultDto(plan.SessionId, plan.ForegroundTurn!.Id, false));
+                }
                 if (DelayNextVoice && request.InputModality == "Voice")
                 {
                     DelayNextVoice = false;
@@ -1614,6 +1665,15 @@ internal static partial class Program
                 }
             }
             return method.Invoke(Inner, args);
+        }
+
+        private async Task<DashboardDto> HoldStartupDashboardAsync(CancellationToken token)
+        {
+            Interlocked.Increment(ref StartupDashboardRequests);
+            var dashboard = await Inner.GetDashboardAsync(token).ConfigureAwait(false);
+            StartupDashboardRequested.TrySetResult();
+            await StartupDashboardGate!.Task.WaitAsync(token).ConfigureAwait(false);
+            return dashboard;
         }
         private async Task<SessionSnapshotDto> HoldNewSessionBeforeRegistrationAsync(string? title, CancellationToken cancellationToken)
         {
@@ -1875,7 +1935,7 @@ internal static partial class Program
 
                 Require(latest is NewInput or ThirdInput or DelayedInput or ReplacementTextInput
                     or HandoffTextInput or HandoffVoiceInput or AfterWakeInput or SpeechResetInput
-                    or SnapshotReplacementInput or AfterSpeechResetInput, "provider_received_unexpected_input");
+                    or SnapshotReplacementInput or AfterSpeechResetInput or AfterCallInput, "provider_received_unexpected_input");
                 return Response(request, latest == ThirdInput ? ThirdReply : NewReply);
             }
             finally

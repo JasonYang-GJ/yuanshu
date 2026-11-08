@@ -15,12 +15,19 @@ internal sealed record ApplicationProcessSnapshot(
     string? ExecutablePath,
     string? PackageFamilyName,
     string? PackageFullName,
-    string? ApplicationUserModelId);
+    string? ApplicationUserModelId)
+{
+    public ApplicationProcessSnapshot? ParentProcess { get; init; }
+}
 
 internal sealed record ApplicationWindowSnapshot(
     IntPtr Handle,
     string Title,
-    ApplicationProcessSnapshot Process);
+    ApplicationProcessSnapshot Process)
+{
+    public string ClassName { get; init; } = "";
+    public uint ExtendedStyle { get; init; }
+}
 
 internal interface IApplicationActivationRuntime
 {
@@ -110,6 +117,7 @@ internal static class TrustedApplicationActivation
             var candidates = runtime.EnumerateVisibleWindows()
                 .Where(item => !before.Contains(item.Handle))
                 .Where(item => item.Process.ProcessStartTimeUtc >= attemptStartedAtUtc)
+                .Where(item => IsApplicationWindowCandidate(application, item))
                 .Where(IsTrustedCalculatorWindow)
                 .ToArray();
             if (candidates.Length > 1)
@@ -126,7 +134,7 @@ internal static class TrustedApplicationActivation
                     attemptStartedAtUtc,
                     before,
                     requireCalculatorIdentity: true,
-                    cancellationToken))
+                    cancellationToken, application))
             {
                 return new VisibleDesktopLaunchResult(
                     candidate.Process.ProcessId,
@@ -164,9 +172,11 @@ internal static class TrustedApplicationActivation
                 ArgumentList = { application.LaunchTarget }
             }
             : new ProcessStartInfo(application.LaunchTarget) { UseShellExecute = true };
-        var existing = EnumerateMatching(runtime, processName, appsFolderTarget)
-            .Where(item => settingsTarget || MatchesRegisteredTarget(application, item.Process))
+        var existing = EnumerateMatching(runtime, processName, appsFolderTarget, application)
+            .Where(item => settingsTarget || MatchesActivationTarget(application, item.Process))
+            .Where(item => IsApplicationWindowCandidate(application, item))
             .ToArray();
+        RequireUniqueSteamWindow(application, existing);
         if (!appsFolderTarget && !settingsTarget && existing is [var alreadyOpen]
             && alreadyOpen.Handle != IntPtr.Zero && alreadyOpen.Process.IsRunning
             && alreadyOpen.Process.ProcessId > 0 && alreadyOpen.Process.ProcessStartTimeUtc != default)
@@ -176,7 +186,7 @@ internal static class TrustedApplicationActivation
             // single-instance app may never make. Keep live identity checks on both sides
             // of activation, and stop instead of relaunching if that identity changes.
             if (!TryActivateBoundWindow(alreadyOpen, runtime, DateTimeOffset.MinValue,
-                    new HashSet<IntPtr>(), requireCalculatorIdentity: false, cancellationToken))
+                    new HashSet<IntPtr>(), requireCalculatorIdentity: false, cancellationToken, application))
                 throw TargetChanged("已打开的软件窗口发生变化或无法确认激活，本次操作已停止。");
             cancellationToken.ThrowIfCancellationRequested();
             launchInitiated?.Invoke();
@@ -205,8 +215,10 @@ internal static class TrustedApplicationActivation
         while (runtime.GetElapsedTime(attemptTimestamp) < windowDiscoveryTimeout)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var windows = EnumerateMatching(runtime, processName, appsFolderTarget)
-                .Where(item => settingsTarget || MatchesRegisteredTarget(application, item.Process)).ToArray();
+            var windows = EnumerateMatching(runtime, processName, appsFolderTarget, application)
+                .Where(item => settingsTarget || MatchesActivationTarget(application, item.Process))
+                .Where(item => IsApplicationWindowCandidate(application, item)).ToArray();
+            RequireUniqueSteamWindow(application, windows);
             var candidate = windows.FirstOrDefault(item => !before.ContainsKey(item.Handle))
                             ?? (!appsFolderTarget
                                 ? windows.FirstOrDefault(item =>
@@ -223,15 +235,18 @@ internal static class TrustedApplicationActivation
                 candidate = windows.FirstOrDefault();
             }
 
-            if (candidate is not null
-                && TryActivateBoundWindow(
+            if (candidate is not null)
+            {
+                var activated = TryActivateBoundWindow(
                     candidate,
                     runtime,
                     DateTimeOffset.MinValue,
                     new HashSet<IntPtr>(),
                     requireCalculatorIdentity: false,
-                    cancellationToken))
-            {
+                    cancellationToken, application);
+                if (!activated && IsSteamApplication(application))
+                    throw TargetChanged("Steam 主窗口或启动进程身份发生变化，本次操作已停止。");
+                if (!activated) { runtime.Wait(PollInterval, cancellationToken); continue; }
                 if (!notified)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
@@ -253,13 +268,64 @@ internal static class TrustedApplicationActivation
     private static IReadOnlyList<ApplicationWindowSnapshot> EnumerateMatching(
         IApplicationActivationRuntime runtime,
         string? processName,
-        bool anyProcess) =>
+        bool anyProcess,
+        KnownDesktopApplication application) =>
         runtime.EnumerateVisibleWindows()
             .Where(item => anyProcess || string.Equals(
                 item.Process.ProcessName,
                 processName,
-                StringComparison.OrdinalIgnoreCase))
+                StringComparison.OrdinalIgnoreCase) || IsSteamHelperFor(application, item.Process))
             .ToArray();
+
+    internal static bool IsInteractiveWindowStyle(uint extendedStyle) =>
+        (extendedStyle & (0x00000080u | 0x08000000u)) == 0; // WS_EX_TOOLWINDOW / WS_EX_NOACTIVATE
+
+    private static bool IsApplicationWindowCandidate(KnownDesktopApplication application, ApplicationWindowSnapshot window)
+    {
+        if (!IsInteractiveWindowStyle(window.ExtendedStyle)) return false;
+        if (IsSteamApplication(application))
+            return string.Equals(window.ClassName, "SDL_app", StringComparison.Ordinal)
+                && string.Equals(window.Title, "Steam", StringComparison.Ordinal);
+        // A registered app can expose titled, ownerless helper windows before its real
+        // interface. CloudMusic's SystemHint/lyrics/mini-player are not its search window.
+        // The executable/AUMID proof remains separate; this is only a narrower selector.
+        return !Path.IsPathFullyQualified(application.LaunchTarget)
+            || !string.Equals(Path.GetFileName(application.LaunchTarget), "cloudmusic.exe", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(window.ClassName, "OrpheusBrowserHost", StringComparison.Ordinal);
+    }
+
+    private static bool IsSteamApplication(KnownDesktopApplication application) =>
+        Path.IsPathFullyQualified(application.LaunchTarget)
+        && string.Equals(Path.GetFileName(application.LaunchTarget), "steam.exe", StringComparison.OrdinalIgnoreCase);
+
+    private static void RequireUniqueSteamWindow(KnownDesktopApplication application, ApplicationWindowSnapshot[] windows)
+    {
+        if (IsSteamApplication(application) && windows.Length > 1)
+            throw new InstalledApplicationResolutionException(InstalledApplicationErrorCodes.Ambiguous,
+                "发现多个可信 Steam 主窗口，无法唯一确定目标，本次没有切换窗口。");
+    }
+
+    // Opening-only handoff. Other skills retain MatchesRegisteredTarget's stricter
+    // executable binding; a helper is not authority for application-internal actions.
+    private static bool MatchesActivationTarget(KnownDesktopApplication application, ApplicationProcessSnapshot process) =>
+        MatchesRegisteredTarget(application, process) || IsSteamHelperFor(application, process);
+
+    private static bool IsSteamHelperFor(KnownDesktopApplication application, ApplicationProcessSnapshot process)
+    {
+        if (!IsSteamApplication(application) || !process.IsRunning || process.ProcessId <= 0
+            || process.ProcessStartTimeUtc == default
+            || !string.Equals(process.ProcessName, "steamwebhelper", StringComparison.OrdinalIgnoreCase)
+            || process.ExecutablePath is not { } helperPath || !Path.IsPathFullyQualified(helperPath)
+            || process.ParentProcess is not { IsRunning: true, ProcessId: > 0 } parent
+            || parent.ProcessId == process.ProcessId || parent.ProcessStartTimeUtc == default
+            || parent.ProcessStartTimeUtc > process.ProcessStartTimeUtc
+            || !string.Equals(parent.ProcessName, "steam", StringComparison.OrdinalIgnoreCase)
+            || !MatchesRegisteredTarget(application, parent)) return false;
+        var root = Path.GetDirectoryName(Path.GetFullPath(application.LaunchTarget))!;
+        return new[] { "cef.win64", "cef.win7x64" }.Any(layout => string.Equals(
+            Path.GetFullPath(helperPath), Path.Combine(root, "bin", "cef", layout, "steamwebhelper.exe"),
+            StringComparison.OrdinalIgnoreCase));
+    }
 
     internal static bool MatchesRegisteredTarget(KnownDesktopApplication application, ApplicationProcessSnapshot process)
     {
@@ -325,13 +391,15 @@ internal static class TrustedApplicationActivation
         DateTimeOffset attemptStartedAtUtc,
         IReadOnlySet<IntPtr> previousHandles,
         bool requireCalculatorIdentity,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        KnownDesktopApplication application)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var current = runtime.ReadWindow(candidate.Handle);
         if (!Matches(candidate, current)
             || current is null
             || !current.Process.IsRunning
+            || !IsApplicationWindowCandidate(application, current)
             || previousHandles.Contains(current.Handle)
             || current.Process.ProcessStartTimeUtc < attemptStartedAtUtc
             || requireCalculatorIdentity && !IsTrustedCalculatorWindow(current))
@@ -349,6 +417,7 @@ internal static class TrustedApplicationActivation
         return Matches(current, afterActivation)
                && afterActivation is not null
                && afterActivation.Process.IsRunning
+               && IsApplicationWindowCandidate(application, afterActivation)
                && (!requireCalculatorIdentity || IsTrustedCalculatorWindow(afterActivation));
     }
 
@@ -357,8 +426,10 @@ internal static class TrustedApplicationActivation
         ApplicationWindowSnapshot? actual) =>
         actual is not null
         && expected.Handle == actual.Handle
+        && string.Equals(expected.ClassName, actual.ClassName, StringComparison.Ordinal)
         && expected.Process.ProcessId == actual.Process.ProcessId
         && expected.Process.ProcessStartTimeUtc == actual.Process.ProcessStartTimeUtc
+        && Equals(expected.Process.ParentProcess, actual.Process.ParentProcess)
         && string.Equals(
             expected.Process.ProcessName,
             actual.Process.ProcessName,
@@ -476,7 +547,7 @@ internal static class TrustedApplicationActivation
         new(InstalledApplicationErrorCodes.TargetChanged, message);
 }
 
-internal sealed class WindowsApplicationActivationRuntime : IApplicationActivationRuntime
+internal sealed partial class WindowsApplicationActivationRuntime : IApplicationActivationRuntime
 {
     private const uint ProcessQueryLimitedInformation = 0x1000;
     private const int ErrorInsufficientBuffer = 122;
@@ -547,8 +618,19 @@ internal sealed class WindowsApplicationActivationRuntime : IApplicationActivati
             return null;
         }
 
+        var className = new StringBuilder(256);
+        if (GetClassName(handle, className, className.Capacity) == 0) return null;
+        Marshal.SetLastPInvokeError(0);
+        var style = IntPtr.Size == 8
+            ? GetWindowLongPtr(handle, -20).ToInt64()
+            : GetWindowLong(handle, -20);
+        if (style == 0 && Marshal.GetLastPInvokeError() != 0) return null;
+        var extendedStyle = unchecked((uint)style);
+        if (!TrustedApplicationActivation.IsInteractiveWindowStyle(extendedStyle)) return null;
+
         var process = ReadProcess((int)processId);
-        return process is null ? null : new ApplicationWindowSnapshot(handle, title, process);
+        return process is null ? null : new ApplicationWindowSnapshot(handle, title, process)
+            { ClassName = className.ToString(), ExtendedStyle = extendedStyle };
     }
 
     public bool TryActivate(IntPtr handle, TimeSpan timeout, CancellationToken cancellationToken) =>
@@ -562,7 +644,7 @@ internal sealed class WindowsApplicationActivationRuntime : IApplicationActivati
         }
     }
 
-    private static ApplicationProcessSnapshot? ReadProcess(int processId)
+    private static ApplicationProcessSnapshot? ReadProcess(int processId, bool includeParent = true)
     {
         try
         {
@@ -585,7 +667,11 @@ internal sealed class WindowsApplicationActivationRuntime : IApplicationActivati
 
             try
             {
-                return new ApplicationProcessSnapshot(
+                // Bind metadata read through Process and the native handle to one
+                // process instance, including parent snapshots sampled recursively.
+                if (!GetProcessTimes(handle, out var creation, out _, out _, out _)
+                    || DateTimeOffset.FromFileTime(creation) != processStartTimeUtc) return null;
+                var snapshot = new ApplicationProcessSnapshot(
                     processId,
                     processName,
                     processStartTimeUtc,
@@ -594,6 +680,11 @@ internal sealed class WindowsApplicationActivationRuntime : IApplicationActivati
                     ReadAppModelValue(handle, GetPackageFamilyName),
                     ReadAppModelValue(handle, GetPackageFullName),
                     ReadAppModelValue(handle, GetApplicationUserModelId));
+                if (includeParent && string.Equals(processName, "steamwebhelper", StringComparison.OrdinalIgnoreCase))
+                {
+                    snapshot = snapshot with { ParentProcess = ReadParentIdentity(handle, processId, processStartTimeUtc) };
+                }
+                return process.HasExited ? null : snapshot;
             }
             finally
             {
@@ -670,6 +761,15 @@ internal sealed class WindowsApplicationActivationRuntime : IApplicationActivati
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetWindowTextLength(IntPtr handle);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr handle, StringBuilder name, int capacity);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
+    private static extern IntPtr GetWindowLongPtr(IntPtr handle, int index);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW", SetLastError = true)]
+    private static extern int GetWindowLong(IntPtr handle, int index);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetWindowText(IntPtr handle, StringBuilder text, int maxCount);

@@ -84,6 +84,7 @@ public sealed class CodexChatModelProvider : IChatModelProvider
             throw DisabledBySecurityPolicyError();
         }
 
+        request = ChatImageInputs.Prepare(request, ProviderId, supportsImages: false);
         ValidateRequest(request);
         if (cancellationToken.IsCancellationRequested)
         {

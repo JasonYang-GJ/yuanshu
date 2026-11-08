@@ -7,6 +7,7 @@ import { RESULT_HOLD_MS } from "./useAssistantSurface";
 import type { AssistantSurfaceState } from "./useAssistantInteraction";
 import type { AssistantPlacement } from "./useAssistantPlacement";
 import { createIslandCoordinator } from "../coordinator";
+import { isVisualConsentActuallyVisible } from "./visibleConsent";
 
 const native = vi.hoisted(() => ({ invoke: vi.fn(), focus: undefined as undefined | ((event: { payload: boolean }) => void), reset: undefined as undefined | ((event: { payload: string }) => void), surface: undefined as undefined | ((event: { payload: unknown }) => void), placement: undefined as undefined | ((event: { payload: unknown }) => void) }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: native.invoke }));
@@ -21,6 +22,13 @@ vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({
 }) }));
 const firstId = "11111111-1111-4111-8111-111111111111";
 const secondId = "22222222-2222-4222-8222-222222222222";
+const consentCases = [
+  ["需要这次视觉搜索许可", "允许请说“允许这次视觉搜索”；拒绝请说“拒绝这次视觉搜索”。"],
+  ["需要只读结果许可", "请保持软件窗口不动。允许请说“允许读取这个临时窗口”；拒绝请说“拒绝读取这个临时窗口”。"],
+  ["需要本次软件任务许可", "本次读取合成窗口文字并交给选定模型完成任务。允许请说“允许这次任务”；拒绝请说“拒绝这次任务”。"],
+  ["需要确认当前这一步", "本步将把合成输入框的旧文字替换为指定内容。允许请说“确认这一步”；拒绝请说“拒绝这一步”。"],
+  ["需要手动确认", "语音确认已停用。请点击“查看确认”，在管理窗口核对完整内容后手动确认。"],
+] as const;
 function fixture(overrides: Partial<AssistantSnapshot> = {}): AssistantSnapshot {
   return { protocolVersion: 1, instanceId: firstId, revision: 1, controlToken: secondId, phase: "listening", status: "正在聆听", transcript: "", detail: "", microphoneOn: true, canStart: false, canPause: true, canStop: false, needsAttention: false, updatedAtUtc: "2026-10-11T02:00:00Z", ...overrides };
 }
@@ -46,6 +54,7 @@ beforeEach(() => {
   native.invoke.mockImplementation(async (command: string) => {
     if (command === "assistant_read") return response();
     if (command === "assistant_presented" || command === "assistant_command") return response();
+    if (command === "assistant_heartbeat") return response(null);
     if (command === "assistant_surface_state") return surface;
     if (command === "assistant_placement_state") return placement;
     if (command === "assistant_release_controls") return surface = { ...surface, interactive: false, revision: surface.revision + 1 };
@@ -54,9 +63,15 @@ beforeEach(() => {
     return undefined;
   });
 });
-afterEach(() => { vi.useRealTimers(); });
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("assistant projection protocol", () => {
+  it("does not send a visibility heartbeat before the first presented handshake", async () => {
+    renderHook(useAssistantBridge); await flush(); await advance(3500);
+    expect(calls("assistant_read").length).toBeGreaterThan(10);
+    expect(calls("assistant_heartbeat")).toHaveLength(0);
+  });
+
   it("rejects unknown phases, mismatched types, oversized/private extras and malformed identity", () => {
     expect(decodeAssistantSnapshot(fixture())).not.toBeNull();
     expect(decodeAssistantSnapshot(fixture({ updatedAtUtc: "2026-10-11T02:00:00.1234567+00:00" }))).not.toBeNull();
@@ -92,6 +107,7 @@ describe("assistant projection protocol", () => {
     expect(result.current.snapshot).toBeNull(); expect(result.current.integrated).toBe(true);
     await act(async () => { await result.current.command("management"); });
     expect(calls("assistant_command")).toHaveLength(0);
+
   });
 
   it("does not retry a command or double-submit while its receipt is delayed", async () => {
@@ -139,6 +155,104 @@ describe("assistant projection protocol", () => {
 });
 
 describe("assistant surface", () => {
+  it("keeps native visibility heartbeats while a new clipped permission stays unacknowledged", async () => {
+    render(<App />); await flush(); await advance(50);
+    expect(calls("assistant_presented")).toContainEqual(["assistant_presented", { instanceId: firstId, revision: 1 }]);
+    current = fixture({ revision: 2, phase: "waiting", status: "需要确认当前这一步",
+      detail: "需完整核对的覆盖内容。".repeat(80), needsAttention: true });
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return this.hasAttribute("data-assistant-detail") ? new DOMRect(25, 100, 420, 900)
+        : new DOMRect(20, 60, 440, 220);
+    });
+    await advance(4000);
+    expect(calls("assistant_heartbeat").length).toBeGreaterThan(10);
+    expect(calls("assistant_heartbeat").every(([, args]) =>
+      JSON.stringify(args) === JSON.stringify({ instanceId: firstId }))).toBe(true);
+    expect(calls("assistant_presented").filter(([, args]) => args.revision === 2)).toHaveLength(0);
+    expect(screen.getByText((current as AssistantSnapshot).detail)).toBeInTheDocument();
+    expect(calls("assistant_command")).toHaveLength(0);
+
+    current = fixture({ revision: 3, phase: "waiting", status: "需要手动确认", needsAttention: true,
+      detail: "语音确认已停用。请点击查看确认，在管理窗口核对完整内容后手动确认。" });
+    vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockImplementation(function (this: HTMLElement) {
+      return this.hasAttribute("data-assistant-detail")
+        ? new DOMRect(25, 100, 420, this.textContent?.startsWith("需完整核对") ? 900 : 150)
+        : new DOMRect(20, 60, 440, 220);
+    });
+    await advance(200); await advance(50);
+    expect(calls("assistant_presented")).toContainEqual(["assistant_presented", { instanceId: firstId, revision: 3 }]);
+    expect(calls("assistant_presented").filter(([, args]) => args.revision === 2)).toHaveLength(0);
+    expect(screen.getByText((current as AssistantSnapshot).detail)).toBeInTheDocument();
+    expect(calls("assistant_command")).toHaveLength(0);
+  });
+
+  it("clears the projection on a rejected heartbeat instead of retrying authorization", async () => {
+    const { result } = renderHook(useAssistantBridge); await flush();
+    await act(async () => { await result.current.presented(result.current.snapshot!); });
+    native.invoke.mockImplementation(async (command: string) => command === "assistant_heartbeat"
+      ? { ok: false, error: "instance_mismatch", snapshot: null } : response());
+    await advance(200);
+    expect(calls("assistant_heartbeat")).toHaveLength(1);
+    expect(result.current.snapshot).toBeNull();
+    expect(calls("assistant_command")).toHaveLength(0);
+  });
+
+  it.each(consentCases)("shows the private %s in full before acknowledging, without public bridge instructions", async (status, phrase) => {
+    const coordinator = createIslandCoordinator();
+    const detail = "仅在本机查看合成应用窗口，不打开结果或发送消息。\n目标窗口：合成窗口\n" + phrase;
+    current = fixture({ status, phase: "waiting", detail, transcript: "在合成应用搜索示例", needsAttention: true });
+    const bounds = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return this.hasAttribute("data-assistant-detail") ? new DOMRect(25, 100, 420, 150)
+        : new DOMRect(20, 60, 440, 220);
+    });
+    const mounted = render(<App coordinator={coordinator} />); await flush();
+    act(() => { coordinator.dispatch({ type: "upsert", presentation: {
+      source: "yuanshu.core", key: "test-wait", kind: "WaitingUser", title: "需要选择窗口", subtitle: "请返回元枢主窗口确认。",
+    } }); });
+    expect(screen.getByText(detail, { normalizer: (text) => text })).toBeVisible();
+    expect(screen.getAllByText(detail, { normalizer: (text) => text })).toHaveLength(1);
+    expect(document.querySelectorAll("[data-assistant-detail]")).toHaveLength(1);
+    expect(screen.queryByText("请返回元枢主窗口确认。")).not.toBeInTheDocument();
+    expect(screen.queryByText("在合成应用搜索示例")).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "媒体与桌面状态" })).not.toBeInTheDocument();
+    expect(calls("assistant_presented")).toHaveLength(0);
+    await advance(50);
+    expect(calls("assistant_presented")).toContainEqual(["assistant_presented", { instanceId: firstId, revision: 1 }]);
+    await controls(true);
+    expect(screen.getByText(detail, { normalizer: (text) => text })).toBeVisible();
+    expect(screen.getAllByText(detail, { normalizer: (text) => text })).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "任务与设置" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "停止" })).toBeDisabled();
+    expect(calls("assistant_command")).toHaveLength(0);
+    mounted.unmount(); coordinator.destroy(); bounds.mockRestore();
+  });
+
+  it.each(consentCases)("does not acknowledge absent, clipped or hidden %s permission", async (status, phrase) => {
+    current = fixture({ status, phase: "waiting", detail: "合成窗口许可。" + phrase,
+      needsAttention: true });
+    expect(isVisualConsentActuallyVisible(current as AssistantSnapshot)).toBe(false);
+    let clipped = true;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return this.hasAttribute("data-assistant-detail") ? new DOMRect(25, 100, 420, clipped ? 300 : 150)
+        : new DOMRect(20, 60, 440, 220);
+    });
+    render(<App />); await flush(); await advance(100);
+    expect(screen.getByText((current as AssistantSnapshot).detail)).toBeInTheDocument();
+    expect(calls("assistant_presented")).toHaveLength(0);
+    clipped = false; await advance(200); await advance(50);
+    expect(calls("assistant_presented")).toHaveLength(1);
+    const exact = current as AssistantSnapshot;
+    expect(isVisualConsentActuallyVisible(exact)).toBe(true);
+    expect(isVisualConsentActuallyVisible({ ...exact, instanceId: secondId })).toBe(false);
+    expect(isVisualConsentActuallyVisible({ ...exact, revision: 2 })).toBe(false);
+    expect(isVisualConsentActuallyVisible({ ...exact, detail: exact.detail + " altered" })).toBe(false);
+    screen.getByRole("region", { name: "元枢语音助手" }).setAttribute("aria-hidden", "true");
+    expect(isVisualConsentActuallyVisible(exact)).toBe(false);
+    const beforeHidden = calls("assistant_presented").length;
+    await advance(200); await advance(50);
+    expect(calls("assistant_presented")).toHaveLength(beforeHidden);
+  });
+
   it("shows retained media and transient volume without replacing microphone state or assistant controls", async () => {
     const coordinator = createIslandCoordinator();
     const mounted = render(<App coordinator={coordinator} />); await flush();

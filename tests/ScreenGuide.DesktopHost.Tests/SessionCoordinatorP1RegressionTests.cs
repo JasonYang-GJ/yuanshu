@@ -26,8 +26,14 @@ public sealed class SessionCoordinatorP1RegressionTests
     {
         await using var environment = DesktopHostTestEnvironment.Create();
         var launcher = new RecordingLauncher();
+        // This contract tests exact structured IDs, not the machine's installed apps.
+        // Use the test executable as a valid, non-elevated target; the launcher stays unused.
+        var application = new KnownDesktopApplication("notepad", "记事本", environment.Options.CodexExecutablePath!);
         using var host = environment.BuildHost(services =>
-            services.AddSingleton<IDesktopProcessLauncher>(launcher));
+        {
+            services.AddSingleton<IDesktopProcessLauncher>(launcher);
+            services.AddSingleton<IInstalledApplicationCatalog>(new SingleApplicationCatalog(application));
+        });
         await host.StartAsync();
         IDesktopApiClient client = new DesktopApiClient(environment.Options.PipeName);
         var session = await client.StartNewSessionAsync("结构化应用目标");
@@ -322,18 +328,20 @@ public sealed class SessionCoordinatorP1RegressionTests
         string expectedPhase)
     {
         var deadline = DateTimeOffset.UtcNow.AddSeconds(5);
+        string? lastPhase = null;
         while (DateTimeOffset.UtcNow < deadline)
         {
             var snapshot = await client.GetCurrentSessionAsync();
-            if (snapshot?.Turns.SingleOrDefault(turn => turn.Id == turnId)?.Phase == expectedPhase)
+            lastPhase = snapshot?.Turns.SingleOrDefault(turn => turn.Id == turnId)?.Phase;
+            if (lastPhase == expectedPhase)
             {
-                return snapshot;
+                return snapshot!;
             }
 
             await Task.Delay(20);
         }
 
-        throw new TimeoutException($"统一会话请求没有进入 {expectedPhase}。 ");
+        throw new TimeoutException($"统一会话请求没有进入 {expectedPhase}；最后阶段：{lastPhase ?? "未找到请求"}。 ");
     }
 
     private static async Task WaitForConditionAsync(Func<bool> condition, string timeoutMessage)
@@ -661,6 +669,16 @@ public sealed class SessionCoordinatorP1RegressionTests
             Task.CompletedTask;
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class SingleApplicationCatalog(KnownDesktopApplication application) : IInstalledApplicationCatalog
+    {
+        public IReadOnlyList<KnownDesktopApplication> GetApplications() => [application];
+        public KnownDesktopApplication? FindById(string id) =>
+            string.Equals(id, application.Id, StringComparison.Ordinal) ? application : null;
+        public KnownDesktopApplication? FindByDisplayName(string displayName) =>
+            string.Equals(displayName, application.DisplayName, StringComparison.Ordinal) ? application : null;
+        public KnownDesktopApplication? FindBrowser(string browserName) => null;
     }
 
     private sealed class RecordingLauncher : IDesktopProcessLauncher

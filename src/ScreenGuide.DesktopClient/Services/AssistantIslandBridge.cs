@@ -277,6 +277,29 @@ public sealed class AssistantIslandBridge : IAsyncDisposable
             case "snapshot":
                 if (!HasExactly(fields, "protocolVersion", "operation")) return Failure("invalid_request");
                 lock (_sync) return SuccessfulSnapshot();
+            case "heartbeat":
+            {
+                if (!HasExactly(fields, "protocolVersion", "operation", "instanceId", "visible")
+                    || !ReadString(root, "instanceId", out var heartbeatInstance)
+                    || !root.TryGetProperty("visible", out var heartbeatVisible)
+                    || heartbeatVisible.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                    return Failure("invalid_request");
+                bool heartbeatLost;
+                lock (_sync)
+                {
+                    if (_disposed) return Failure("bridge_closed");
+                    if (!StringComparer.Ordinal.Equals(heartbeatInstance, InstanceId)) return Failure("instance_mismatch");
+                    // A heartbeat may maintain an already presented, visible
+                    // surface, but cannot establish or restore presentation.
+                    if (!_handshakeComplete || heartbeatVisible.GetBoolean() && !_visible)
+                        return Failure("presentation_required");
+                    heartbeatLost = SetVisible(heartbeatVisible.GetBoolean());
+                    if (_visible) _lastVisibleTimestamp = Stopwatch.GetTimestamp();
+                }
+                if (heartbeatLost) NotifyVisibilityLost();
+                // Do not return/register a snapshot, a presented revision, or Ready.
+                return new(true, null, null);
+            }
             case "presented":
                 if (!HasExactly(fields, "protocolVersion", "operation", "instanceId", "revision", "visible")
                     || !ReadString(root, "instanceId", out var instanceId)

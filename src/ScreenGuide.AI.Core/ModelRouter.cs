@@ -206,6 +206,9 @@ public sealed class ModelRouter(
         }
 
         var registration = providers.GetRequired(route.ProviderId, route.ModelId);
+        request = ChatImageInputs.Prepare(request, route.ProviderId,
+            route.Capabilities.HasFlag(ChatModelCapabilities.Vision)
+                && registration.Model.Capabilities.HasFlag(ChatModelCapabilities.Vision));
         if (!_activeTurns.TryAdd(request.TurnId, registration.Provider))
         {
             throw new InvalidOperationException("同一个 Turn 已经有正在运行的模型请求。");

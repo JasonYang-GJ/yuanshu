@@ -2,7 +2,7 @@ using System.Diagnostics;
 
 namespace ScreenGuide.Skills.Windows.Tests;
 
-public sealed class ApplicationActivationHandoffTests
+public sealed partial class ApplicationActivationHandoffTests
 {
     private static readonly DateTimeOffset AttemptTime =
         new(2026, 9, 2, 12, 0, 0, TimeSpan.Zero);

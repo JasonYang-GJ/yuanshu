@@ -265,7 +265,7 @@ public sealed class DesktopActionEntryService(
         }
     }
 
-    private static ApplicationSearchWorkflowResult RequireWorkflowEvidence(
+    internal static ApplicationSearchWorkflowResult RequireWorkflowEvidence(
         string? json, ApplicationSearchWorkflow workflow)
     {
         ApplicationSearchWorkflowResult? evidence;
@@ -280,6 +280,7 @@ public sealed class DesktopActionEntryService(
         }
         if (evidence is null || !evidence.ApplicationVerified || !evidence.QuerySubmitted
             || !evidence.ResultsVerified
+            || !ApplicationSearchWorkflowEvidence.MatchesMusicIntent(workflow, evidence)
             || (workflow.FollowUp == ApplicationSearchFollowUp.None
                 ? evidence.FollowUpInvoked || evidence.FollowUpVerified
                 : evidence.NoResults || !evidence.FollowUpInvoked || !evidence.FollowUpVerified))
@@ -301,6 +302,7 @@ public sealed class DesktopActionEntryService(
     }
 
     private static string NormalizeAuthorizationSource(string? value) =>
+        string.Equals(value, "ExplicitTask", StringComparison.Ordinal) ? "ExplicitTask" :
         string.Equals(value, "ExplicitVoice", StringComparison.Ordinal)
             ? "ExplicitVoice"
             : "VisibleConfirmation";

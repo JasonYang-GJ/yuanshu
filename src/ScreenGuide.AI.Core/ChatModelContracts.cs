@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace ScreenGuide.AI.Core;
 
 public enum ChatMessageRole
@@ -11,7 +13,8 @@ public enum ChatMessageRole
 public sealed record ChatMessage(
     ChatMessageRole Role,
     string Content,
-    string? Name = null);
+    string? Name = null,
+    [property: JsonIgnore] IReadOnlyList<ChatImage>? Images = null);
 
 public sealed record ChatPromptReference(
     string PromptId,

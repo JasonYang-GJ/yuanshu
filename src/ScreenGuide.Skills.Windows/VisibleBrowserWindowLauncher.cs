@@ -268,7 +268,7 @@ public static class VisibleWindowActivation
     public static bool TryActivate(IntPtr handle, TimeSpan timeout) =>
         TryActivate(handle, timeout, CancellationToken.None);
 
-    internal static bool TryActivate(
+    public static bool TryActivate(
         IntPtr handle,
         TimeSpan timeout,
         CancellationToken cancellationToken)

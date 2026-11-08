@@ -232,6 +232,7 @@ public sealed class DeepSeekChatModelProvider : IChatModelProvider
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         ArgumentNullException.ThrowIfNull(request);
+        request = ChatImageInputs.Prepare(request, ProviderId, supportsImages: false);
         ValidateRequest(request);
         var active = new ActiveCall();
         if (!_activeCalls.TryAdd(request.TurnId, active))

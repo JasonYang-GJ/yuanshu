@@ -492,6 +492,8 @@ public sealed class SessionFrozenRouteTests
         var prepared = Assert.Single((await coordinator.GetCurrentAsync())!.MemoryOutboundConsents);
 
         Assert.Equal(MemoryOutboundConsentState.WaitingForMemoryOutboundConsent, waiting.MemoryOutboundState);
+        Assert.Equal("4", prepared.PromptVersion);
+        Assert.Equal(prepared.ManifestHash, preparedDto.ManifestHash);
         Assert.Equal("请叫我小元", Assert.Single(prepared.Items).Body);
         Assert.Equal("请叫我小元", Assert.Single(preparedDto.Items).Body);
         Assert.Equal("https://provider-a.example", preparedDto.DestinationOrigin);
@@ -511,7 +513,8 @@ public sealed class SessionFrozenRouteTests
 
         Assert.Equal(MemoryOutboundConsentState.Consumed, completed.MemoryOutboundState);
         var providerRequest = Assert.Single(provider.Requests);
-        Assert.Equal("2", providerRequest.Prompt?.Version);
+        Assert.Equal("4", providerRequest.Prompt?.Version);
+        Assert.Equal(prepared.PromptContentHash, providerRequest.Prompt?.ContentSha256);
         Assert.Equal(2, providerRequest.Messages.Count);
         Assert.StartsWith("{\"type\":\"USER_SELECTED_MEMORY_CONTEXT_V1\"", providerRequest.Messages[0].Content, StringComparison.Ordinal);
         Assert.Equal("处理刚才那个", providerRequest.Messages[1].Content);

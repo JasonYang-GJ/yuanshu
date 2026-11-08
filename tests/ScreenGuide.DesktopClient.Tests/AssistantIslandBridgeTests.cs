@@ -303,6 +303,157 @@ public sealed class AssistantIslandBridgeTests
     }
 
     [Fact]
+    public async Task HeartbeatCannotReplaceTheInitialReadAndPresentedHandshake()
+    {
+        var calls = 0;
+        await using var bridge = BoundBridge((_, _) => { calls++; return Task.FromResult(true); });
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var ready = bridge.WaitForReadyAsync(cancellation.Token);
+
+        AssertFailure(await HeartbeatAsync(bridge, true), "presentation_required");
+        Assert.False(bridge.IsVisible);
+        Assert.False(ready.IsCompleted);
+        AssertFailure(await PresentAsync(bridge, 0, true), "snapshot_required");
+
+        var snapshot = await ReadSnapshotAsync(bridge);
+        AssertFailure(await HeartbeatAsync(bridge, true), "presentation_required");
+        AssertFailure(await HeartbeatAsync(bridge, false), "presentation_required");
+        Assert.False(bridge.IsVisible);
+        Assert.False(ready.IsCompleted);
+        AssertFailure(await CommandAsync(bridge, snapshot, "start"), "presentation_required");
+        Assert.Equal(0, calls);
+
+        Assert.True((await PresentAsync(bridge, snapshot.Revision, true)).GetProperty("ok").GetBoolean());
+        await ready;
+        Assert.True(bridge.IsVisible);
+    }
+
+    [Theory]
+    [InlineData("{\"protocolVersion\":1,\"operation\":\"heartbeat\",\"instanceId\":\"INSTANCE\",\"visible\":\"false\"}", "invalid_request")]
+    [InlineData("{\"protocolVersion\":1,\"operation\":\"heartbeat\",\"instanceId\":\"INSTANCE\",\"visible\":null}", "invalid_request")]
+    [InlineData("{\"protocolVersion\":1,\"operation\":\"heartbeat\",\"instanceId\":\"INSTANCE\"}", "invalid_request")]
+    [InlineData("{\"protocolVersion\":1,\"operation\":\"heartbeat\",\"instanceId\":null,\"visible\":false}", "invalid_request")]
+    [InlineData("{\"protocolVersion\":1,\"operation\":\"heartbeat\",\"instanceId\":\"INSTANCE\",\"visible\":false,\"revision\":0}", "invalid_request")]
+    [InlineData("{\"protocolVersion\":1,\"operation\":\"heartbeat\",\"instanceId\":\"INSTANCE\",\"visible\":true,\"visible\":false}", "duplicate_field")]
+    public async Task MalformedHeartbeatCannotRevokeVisibilityOrReadNewProjection(string request, string error)
+    {
+        await using var bridge = BoundBridge();
+        var snapshot = await ReadSnapshotAsync(bridge);
+        await PresentAsync(bridge, snapshot.Revision, true);
+        var revision = bridge.Publish(snapshot with { Phase = "recognized", Transcript = "尚未读取的新内容" });
+        var wire = request.Replace("INSTANCE", bridge.InstanceId, StringComparison.Ordinal);
+
+        AssertFailure(await ExchangeRawAsync(bridge.PipeName, Encoding.UTF8.GetBytes(wire)), error);
+        Assert.True(bridge.IsVisible);
+        Assert.True(bridge.WaitForReadyAsync(CancellationToken.None).IsCompletedSuccessfully);
+        AssertFailure(await PresentAsync(bridge, revision, true), "snapshot_required");
+    }
+
+    [Fact]
+    public async Task WrongInstanceHeartbeatCannotHideTheBoundIslandOrReadNewProjection()
+    {
+        var lost = 0;
+        await using var bridge = BoundBridge();
+        bridge.VisibilityLost += () => Interlocked.Increment(ref lost);
+        var snapshot = await ReadSnapshotAsync(bridge);
+        await PresentAsync(bridge, snapshot.Revision, true);
+        var revision = bridge.Publish(snapshot with { Phase = "recognized", Transcript = "本实例的新内容" });
+
+        AssertFailure(await HeartbeatAsync(bridge, false, Guid.NewGuid().ToString("D")), "instance_mismatch");
+        Assert.True(bridge.IsVisible);
+        Assert.Equal(0, Volatile.Read(ref lost));
+        Assert.True(bridge.WaitForReadyAsync(CancellationToken.None).IsCompletedSuccessfully);
+        AssertFailure(await PresentAsync(bridge, revision, true), "snapshot_required");
+    }
+
+    [Fact]
+    public async Task HeartbeatsKeepVisibilityAliveWithoutPresentingNewRevisionAndExpireWhenStopped()
+    {
+        var lost = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var lostCount = 0;
+        await using var bridge = BoundBridge();
+        bridge.VisibilityLost += () => { Interlocked.Increment(ref lostCount); lost.TrySetResult(true); };
+        var snapshot = await ReadSnapshotAsync(bridge);
+        await PresentAsync(bridge, snapshot.Revision, true);
+        await bridge.WaitForReadyAsync(CancellationToken.None);
+        var revision = bridge.Publish(snapshot with { Phase = "recognized", Transcript = "必须实际呈现后才能继续" });
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var presented = bridge.WaitForPresentedAsync(revision, cancellation.Token);
+        var elapsed = Stopwatch.StartNew();
+
+        while (elapsed.Elapsed < TimeSpan.FromMilliseconds(3400))
+        {
+            var response = await HeartbeatAsync(bridge, true);
+            Assert.True(response.GetProperty("ok").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, response.GetProperty("snapshot").ValueKind);
+            Assert.True(bridge.IsVisible);
+            Assert.False(presented.IsCompleted);
+            await Task.Delay(200);
+        }
+
+        Assert.Equal(0, Volatile.Read(ref lostCount));
+        Assert.True(bridge.IsVisible);
+        Assert.True(bridge.WaitForReadyAsync(cancellation.Token).IsCompletedSuccessfully);
+        AssertFailure(await PresentAsync(bridge, revision, true), "snapshot_required");
+        Assert.Equal(revision, (await ReadSnapshotAsync(bridge)).Revision);
+        Assert.True((await HeartbeatAsync(bridge, true)).GetProperty("ok").GetBoolean());
+        Assert.False(presented.IsCompleted);
+
+        // Once heartbeats stop, the existing three-second visibility lease still expires.
+        await lost.Task.WaitAsync(TimeSpan.FromSeconds(6));
+        Assert.False(bridge.IsVisible);
+        Assert.Equal(1, Volatile.Read(ref lostCount));
+        var readyAgain = bridge.WaitForReadyAsync(cancellation.Token);
+        var oldPresentation = bridge.WaitForPresentedAsync(snapshot.Revision, cancellation.Token);
+        Assert.False(readyAgain.IsCompleted);
+        Assert.False(oldPresentation.IsCompleted);
+        Assert.False(presented.IsCompleted);
+        AssertFailure(await CommandAsync(bridge, snapshot, "start"), "island_not_visible");
+
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => readyAgain);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => oldPresentation);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => presented);
+    }
+
+    [Fact]
+    public async Task HiddenHeartbeatRevokesReadinessAndPresentationUntilAnotherPresentedReceipt()
+    {
+        var lost = 0;
+        await using var bridge = BoundBridge();
+        bridge.VisibilityLost += () => Interlocked.Increment(ref lost);
+        var snapshot = await ReadSnapshotAsync(bridge);
+        await PresentAsync(bridge, snapshot.Revision, true);
+        await bridge.WaitForReadyAsync(CancellationToken.None);
+        await bridge.WaitForPresentedAsync(snapshot.Revision, CancellationToken.None);
+
+        var response = await HeartbeatAsync(bridge, false);
+        Assert.True(response.GetProperty("ok").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, response.GetProperty("snapshot").ValueKind);
+        Assert.False(bridge.IsVisible);
+        Assert.Equal(1, Volatile.Read(ref lost));
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var readyAgain = bridge.WaitForReadyAsync(cancellation.Token);
+        var presentedAgain = bridge.WaitForPresentedAsync(snapshot.Revision, cancellation.Token);
+        Assert.False(readyAgain.IsCompleted);
+        Assert.False(presentedAgain.IsCompleted);
+        AssertFailure(await CommandAsync(bridge, snapshot, "start"), "island_not_visible");
+
+        Assert.True((await HeartbeatAsync(bridge, false)).GetProperty("ok").GetBoolean());
+        Assert.Equal(1, Volatile.Read(ref lost));
+        AssertFailure(await HeartbeatAsync(bridge, true), "presentation_required");
+        Assert.False(bridge.IsVisible);
+        Assert.False(readyAgain.IsCompleted);
+        Assert.False(presentedAgain.IsCompleted);
+        AssertFailure(await CommandAsync(bridge, snapshot, "start"), "island_not_visible");
+
+        Assert.True((await PresentAsync(bridge, snapshot.Revision, true)).GetProperty("ok").GetBoolean());
+        await readyAgain;
+        await presentedAgain;
+        Assert.Equal(1, Volatile.Read(ref lost));
+    }
+
+    [Fact]
     public async Task CancelledPresentationWaitDoesNotExecuteOrPoisonLaterReceipts()
     {
         var calls = 0;
@@ -352,6 +503,9 @@ public sealed class AssistantIslandBridgeTests
 
     private static Task<JsonElement> PresentAsync(AssistantIslandBridge bridge, long revision, bool visible, string? instanceId = null) =>
         ExchangeAsync(bridge, new { protocolVersion = 1, operation = "presented", instanceId = instanceId ?? bridge.InstanceId, revision, visible });
+
+    private static Task<JsonElement> HeartbeatAsync(AssistantIslandBridge bridge, bool visible, string? instanceId = null) =>
+        ExchangeAsync(bridge, new { protocolVersion = 1, operation = "heartbeat", instanceId = instanceId ?? bridge.InstanceId, visible });
 
     private static Task<JsonElement> CommandAsync(AssistantIslandBridge bridge, AssistantIslandSnapshot snapshot, string action) =>
         ExchangeAsync(bridge, new { protocolVersion = 1, operation = "command", instanceId = snapshot.InstanceId, controlToken = snapshot.ControlToken, action });

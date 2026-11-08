@@ -21,8 +21,7 @@ public sealed class RoutedConversationProvider(
     TimeProvider timeProvider) : IConversationProvider
 {
     private const string ChatPromptId = "chat.general";
-    private const string DefaultChatPromptVersion = "1";
-    private const string MemoryChatPromptVersion = "2";
+    internal const string ChatPromptVersion = "4";
     private const string PointerPromptId = "window.pointer.answer";
     private const string PointerPromptVersion = "1";
     private const int MaximumHistoryCharacters = 200_000;
@@ -98,9 +97,7 @@ public sealed class RoutedConversationProvider(
         var promptId = request.PointerAnswer is null ? ChatPromptId : PointerPromptId;
         var promptVersion = request.PointerAnswer is not null
             ? PointerPromptVersion
-            : request.MemoryOutbound is null
-                ? DefaultChatPromptVersion
-                : MemoryChatPromptVersion;
+            : ChatPromptVersion;
         var prompt = prompts.GetRequired(promptId, promptVersion, route.ProviderId);
         if (request.MemoryOutbound is { } memoryOutbound
             && !ValidateMemoryOutbound(memoryOutbound, route, prompt))

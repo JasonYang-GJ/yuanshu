@@ -20,6 +20,7 @@ public static partial class DesktopFileRequest
     public static bool TryParse(string? text, out ParsedDesktopFileRequest? request)
     {
         request = null;
+        text = ApplicationSearchRequest.NormalizeSpokenActionLeadIn(text?.Trim() ?? string.Empty);
         // “打开桌面上的某应用，然后搜索…” names an application workflow, not
         // one long desktop filename. Keep literal/quoted filenames authoritative.
         if (ApplicationSearchRequest.HasExplicitApplicationSequence(text?.Trim() ?? string.Empty)) return false;

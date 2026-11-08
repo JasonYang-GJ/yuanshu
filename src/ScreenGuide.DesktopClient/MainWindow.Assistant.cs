@@ -7,23 +7,58 @@ public partial class MainWindow
 {
     private AssistantOrbWindow? _assistantWindow;
     private readonly DateTimeOffset _clientOpenedAt = DateTimeOffset.UtcNow;
+    private Task<bool>? _assistantSurfaceInitialization;
+
+    public async Task ActivateFromLaunchAsync(DesktopActivationRequest request)
+    {
+        if (_forceClose || _lifetime.IsCancellationRequested) return;
+        try
+        {
+            if (request.ShowManagement) OpenDashboardFromTray();
+            else await ShowAssistantAsync(request.StartListening);
+        }
+        catch (OperationCanceledException) when (_forceClose || _lifetime.IsCancellationRequested) { }
+        catch (Exception exception)
+        {
+            if (!_forceClose) ShowError("元枢未能完成本次打开，请重试。", exception);
+        }
+    }
 
     public async Task ShowAssistantAsync(bool startListening)
+    {
+        if (_forceClose || _lifetime.IsCancellationRequested) return;
+        var stopVersion = _voiceSession.StopVersion;
+        var firstOpening = _assistantSurfaceInitialization is null;
+        // Repeated launches share surface creation, never a second Island child or listener.
+        var initialization = _assistantSurfaceInitialization ??= InitializeAssistantSurfaceAsync();
+        bool ready;
+        try { ready = await initialization; }
+        catch
+        {
+            if (ReferenceEquals(_assistantSurfaceInitialization, initialization)) _assistantSurfaceInitialization = null;
+            throw;
+        }
+        if (!ready && ReferenceEquals(_assistantSurfaceInitialization, initialization)) _assistantSurfaceInitialization = null;
+        if (!ready || _forceClose || _lifetime.IsCancellationRequested) return;
+        if (!firstOpening) ShowAssistantSurface();
+        if (!startListening || stopVersion != _voiceSession.StopVersion) return;
+        var visible = _islandRequested
+            ? _islandBridge is { IsVisible: true } && _islandProcess is { HasExited: false }
+            : _assistantWindow is { IsVisible: true };
+        if (visible) await _voiceSession.StartAsync(_lifetime.Token);
+    }
+
+    private async Task<bool> InitializeAssistantSurfaceAsync()
     {
         if (_islandRequested)
         {
             var ready = await TryShowIslandAsync();
             await InitializeClientAsync();
-            if (ready && startListening && !_forceClose && _islandBridge is { IsVisible: true })
-                await _voiceSession.StartAsync(_lifetime.Token);
-            return;
+            return ready;
         }
         ShowAssistantSurface();
         await InitializeClientAsync();
-        // The visible surface must exist before any capture. Closing during initialization wins.
-        if (startListening && !_forceClose && !_lifetime.IsCancellationRequested
-            && _assistantWindow is { IsVisible: true })
-            await _voiceSession.StartAsync(_lifetime.Token);
+        return true;
     }
 
     public void ShowAssistantSurface()
@@ -48,8 +83,10 @@ public partial class MainWindow
                 }
                 else if (_voiceSession.Status.CanStart)
                 {
+                    var stopVersion = _voiceSession.StopVersion;
                     await InitializeClientAsync();
-                    if (!_forceClose && _assistantWindow.IsVisible)
+                    if (!_forceClose && !_lifetime.IsCancellationRequested && _assistantWindow.IsVisible
+                        && stopVersion == _voiceSession.StopVersion)
                         await _voiceSession.StartAsync(_lifetime.Token);
                 }
             };
@@ -74,7 +111,11 @@ public partial class MainWindow
     private void RenderAssistantSurface()
     {
         RenderIslandSurface();
-        if (_assistantWindow is null || _forceClose) return;
+        if (_assistantWindow is null || _forceClose)
+        {
+            RefreshVisualVoiceConsent();
+            return;
+        }
         var voice = _voiceSession.Status;
         var presentation = SessionUiPresenter.Present(_currentSession);
         var turn = _currentSession?.ForegroundTurn ?? _currentSession?.Turns.LastOrDefault();
@@ -88,10 +129,16 @@ public partial class MainWindow
             ? "直接说出你想聊或想做的事。点击小球可暂停聆听。"
             : "点击小球开始语音，或打开管理窗口打字。";
         var micState = _voiceSession.IsListening ? "麦克风开启" : "麦克风未开启";
+        var localReply = GetLocalVoiceReply(needsAttention || presentation.ShowStop || _voiceCommandBusy
+            || turn?.Phase is "Failed" or "Interrupted"
+            || _voiceReception.Mode == VoiceReceptionMode.Standby
+            || voice.State is VoiceSessionState.Faulted or VoiceSessionState.CleanupFailed
+            || ErrorBanner.Visibility == Visibility.Visible);
         if (needsAttention)
         {
             status = $"需要你确认 · {micState}";
-            detail = presentation.StatusText + "。点击“查看确认”继续。";
+            detail = (string.IsNullOrWhiteSpace(presentation.DetailText)
+                ? presentation.StatusText : presentation.DetailText) + "。点击“查看确认”继续。";
         }
         else if (presentation.ShowStop)
         {
@@ -102,7 +149,12 @@ public partial class MainWindow
         {
             detail = presentation.DetailText;
         }
-        if (speaking)
+        if (localReply is not null)
+        {
+            status = $"正在聆听 · {micState}";
+            detail = localReply;
+        }
+        if (speaking && (!_localCallSpeech || !needsAttention && !presentation.ShowStop && !_voiceCommandBusy))
         {
             status = $"正在回答 · {micState}";
             detail = _activeSpeechText ?? detail;
@@ -127,7 +179,25 @@ public partial class MainWindow
             status = _receptionTransitionText;
             detail = "正在切换本机语音接收，暂不接收新的语音指令。";
         }
+        // This permission must remain visible while the recognizer drains old audio.
+        // Speech/transcription status cannot replace the purpose-specific prompt.
+        if (!_islandRequested)
+        {
+            _visualConsentRenderedBinding = GetDisplayableVisualConsent();
+            if (_visualConsentRenderedBinding is { } consent)
+            {
+                status = $"需要你确认 · {micState}";
+                if (_visualConsentUnavailable == consent)
+                {
+                    detail = VisualSearchVoiceConsentGate.ManualConfirmationPrompt;
+                    _visualConsentRenderedBinding = null;
+                }
+                else detail = (string.IsNullOrWhiteSpace(presentation.DetailText)
+                    ? presentation.StatusText : presentation.DetailText) + "\n" + VisualConsentPrompt(consent);
+            }
+        }
         _assistantWindow.Render(status, detail, voice.CanStart, voice.CanStop, speaking, needsAttention,
             presentation.ShowStop || needsAttention || speaking);
+        RefreshVisualVoiceConsent();
     }
 }

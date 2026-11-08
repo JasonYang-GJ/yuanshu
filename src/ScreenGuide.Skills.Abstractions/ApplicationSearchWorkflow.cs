@@ -9,14 +9,19 @@ public sealed record ApplicationSearchWorkflow(
     string ApplicationId,
     string Query,
     ApplicationSearchFollowUp FollowUp = ApplicationSearchFollowUp.None,
-    string? LatestMusicArtist = null)
+    string? LatestMusicArtist = null,
+    string? MusicChart = null)
 {
+    public const string NetEaseHotChart = "NetEaseHotChart";
+
     public void Validate()
     {
         if (string.IsNullOrWhiteSpace(ApplicationId) || ApplicationId.Length > 256
             || ApplicationId.Any(char.IsControl) || ApplicationId != ApplicationId.Trim()
             || string.IsNullOrWhiteSpace(Query) || Query.Length > 200 || Query.Any(char.IsControl)
             || Query != Query.Trim() || !Enum.IsDefined(FollowUp)
+            || MusicChart is not null && (MusicChart != NetEaseHotChart || LatestMusicArtist is not null
+                || FollowUp == ApplicationSearchFollowUp.OpenFirst)
             || LatestMusicArtist is not null && (string.IsNullOrWhiteSpace(LatestMusicArtist)
                 || LatestMusicArtist.Length > 80 || LatestMusicArtist != LatestMusicArtist.Trim()
                 || LatestMusicArtist.Any(char.IsControl)
@@ -33,6 +38,15 @@ public sealed record ApplicationSearchWorkflow(
             throw new ArgumentException("搜索流程缺少应用目标绑定。", nameof(applicationTargetBinding));
         // Ordinary-search scopes retain their original exact representation. Latest
         // music lookup is a separate explicit intent and must survive every re-plan.
+        if (MusicChart is not null)
+            return JsonSerializer.Serialize(new
+            {
+                applicationId = ApplicationId,
+                applicationTargetBinding = applicationTargetBinding.ToUpperInvariant(),
+                query = Query,
+                followUp = FollowUp.ToString(),
+                musicChart = MusicChart
+            });
         if (LatestMusicArtist is not null)
             return JsonSerializer.Serialize(new
             {

@@ -134,6 +134,15 @@ public static class DesktopHostFactory
         builder.Services.AddSingleton<AiSettingsService>();
         builder.Services.AddSingleton<MemoryService>();
         builder.Services.AddSingleton<ModelSemanticIntentSuggester>();
+        builder.Services.AddSingleton<IDesktopTaskStepPlanner, ModelDesktopTaskPlanner>();
+        builder.Services.AddSingleton<IDesktopVisualStepPlanner, ModelDesktopVisualPlanner>();
+        builder.Services.AddSingleton<IDesktopVisualAutomation, DesktopVisualWorkerClient>();
+        builder.Services.AddSingleton<IDesktopVisualTargetPreview, WindowsDesktopVisualTargetPreview>();
+        builder.Services.AddSingleton<IDesktopVisualTaskExecutor, DesktopVisualTaskExecutionService>();
+        builder.Services.AddSingleton<IDesktopTaskAutomation, DesktopTaskWorkerClient>();
+        builder.Services.AddSingleton<IDesktopTaskWindowActivator, DesktopTaskWindowActivator>();
+        builder.Services.AddSingleton<DesktopTaskInteractionChannel>();
+        builder.Services.AddSingleton<IDesktopTaskExecutor, DesktopTaskExecutionService>();
         builder.Services.AddSingleton<ISemanticIntentSuggester>(services =>
             services.GetRequiredService<ModelSemanticIntentSuggester>());
         builder.Services.AddSingleton<CodexDiagnosticsService>();
@@ -153,6 +162,9 @@ public static class DesktopHostFactory
         builder.Services.AddSingleton<ILatestMusicResolver, LatestMusicResolver>();
         builder.Services.AddSingleton<ApplicationSearchProgressChannel>();
         builder.Services.AddSingleton<IApplicationSearchProgressSink>(services => services.GetRequiredService<ApplicationSearchProgressChannel>());
+        builder.Services.AddSingleton<VisualSearchConsentChannel>();
+        builder.Services.AddSingleton<IVisualSearchConsent>(services => services.GetRequiredService<VisualSearchConsentChannel>());
+        builder.Services.AddSingleton<IVisualSearchResultWindowVerifier, WindowsVisualSearchResultWindowVerifier>();
         builder.Services.AddSingleton<IApplicationSearchWorkflowAutomation, WindowsApplicationSearchWorkflowAutomation>();
         builder.Services.AddSingleton<ISensitiveWindowPolicy, WindowsSensitiveWindowPolicy>();
         builder.Services.AddSingleton<IWindowCaptureTargetVerifier, WindowsWindowCaptureTargetVerifier>();
@@ -163,6 +175,8 @@ public static class DesktopHostFactory
         builder.Services.AddSingleton<IPointerDesktopProbe, WindowsPointerDesktopProbe>();
         builder.Services.AddSingleton<IPointerRegionCaptureService, WindowsPointerRegionCaptureService>();
         builder.Services.AddSingleton<ILocalOcrTextExtractor, WindowsLocalOcrTextExtractor>();
+        builder.Services.AddSingleton<VisualSearchImageReader>();
+        builder.Services.AddSingleton<IVisualSearchAutomation, WindowsVisualSearchAutomation>();
         builder.Services.AddSingleton<IWindowVisionProvider, WindowsLocalWindowVisionProvider>();
         builder.Services.AddSingleton<WindowUnderstandingService>();
         builder.Services.AddSingleton<PointerRegionUnderstandingService>();
@@ -200,7 +214,10 @@ public static class DesktopHostFactory
             services.GetServices<ISessionMemoryConsentPublicationObserver>(),
             services.GetRequiredService<IForegroundWindowContextProvider>(),
             services.GetRequiredService<TimeProvider>(),
-            services.GetRequiredService<ApplicationSearchProgressChannel>()));
+            services.GetRequiredService<ApplicationSearchProgressChannel>(),
+            services.GetRequiredService<VisualSearchConsentChannel>(),
+            services.GetRequiredService<IVisualSearchResultWindowVerifier>(),
+            services.GetRequiredService<DesktopTaskInteractionChannel>()));
         builder.Services.AddSingleton<BridgeServerInstance>();
         builder.Services.AddSingleton<BridgeSnapshotProjection>();
         builder.Services.AddSingleton<BridgeProtocolService>();

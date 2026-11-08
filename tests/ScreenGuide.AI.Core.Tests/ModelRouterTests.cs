@@ -5,6 +5,38 @@ namespace ScreenGuide.AI.Core.Tests;
 
 public sealed class ModelRouterTests
 {
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task ImagesRequireBothFrozenAndRegisteredVisionCapability(bool frozenVision, bool registeredVision)
+    {
+        var provider = new RecordingProvider("provider-a", "model-a", capabilities:
+            registeredVision ? ChatModelCapabilities.Vision : ChatModelCapabilities.None);
+        var settings = new MutableSettingsStore(new AiSettings(new ChatModelRoute("provider-a", "model-a")));
+        var router = new ModelRouter(new ChatProviderRegistry([provider]), settings);
+        var frozen = (await router.FreezeDefaultChatRouteAsync()) with
+        { Capabilities = frozenVision ? ChatModelCapabilities.Vision : ChatModelCapabilities.None };
+        using var image = new ChatImage(Convert.FromBase64String(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGP4/x8AAwAB//wl3FEAAAAASUVORK5CYII="));
+        var request = new ChatModelRequest(Guid.NewGuid(), Guid.NewGuid(), "model-a", "system",
+            [new(ChatMessageRole.User, "synthetic image", Images: [image])]);
+        if (frozenVision && registeredVision)
+        {
+            await router.CompleteAsync(frozen, request);
+            Assert.Equal(1, provider.CompleteCount);
+        }
+        else
+        {
+            var error = await Assert.ThrowsAsync<ChatModelException>(() => router.CompleteAsync(frozen, request));
+            Assert.Equal("chat.vision_not_supported", error.Error.Code);
+            Assert.Equal(0, provider.CompleteCount);
+        }
+        Assert.False(image.IsDisposed);
+        Assert.Equal(1, settings.LoadCount);
+    }
+
     [Fact]
     public void RestoreFrozenRouteUsesOnlyPersistedMetadataAndDoesNotReadCurrentSettings()
     {
@@ -370,14 +402,15 @@ public sealed class ModelRouterTests
     private sealed class RecordingProvider(
         string providerId,
         string modelId,
-        string? dataDestination = null) : IChatModelProvider
+        string? dataDestination = null,
+        ChatModelCapabilities capabilities = ChatModelCapabilities.Streaming) : IChatModelProvider
     {
         public ChatProviderDescriptor Descriptor { get; } = new(
             providerId,
             providerId,
             dataDestination ?? $"api.{providerId}.example",
             true,
-            [new ChatModelDescriptor(modelId, modelId, ChatModelCapabilities.Streaming)]);
+            [new ChatModelDescriptor(modelId, modelId, capabilities)]);
 
         public int CompleteCount { get; private set; }
 

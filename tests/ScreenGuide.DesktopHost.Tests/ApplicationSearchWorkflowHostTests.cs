@@ -9,9 +9,39 @@ using ScreenGuide.Skills.Windows;
 
 namespace ScreenGuide.DesktopHost.Tests;
 
-public sealed class ApplicationSearchWorkflowHostTests
+public sealed partial class ApplicationSearchWorkflowHostTests
 {
     private const string SearchText = "打开网易云音乐并搜索晴天";
+
+    [Fact]
+    public async Task HotChartPlaybackKeepsFullCanonicalTargetInTheOriginalSessionTurn()
+    {
+        await using var environment = DesktopHostTestEnvironment.Create();
+        var catalog = CreateRegistrationCatalog(environment.RootDirectory, "网易云音乐");
+        var automation = new RecordingWorkflow();
+        using var host = environment.BuildHost(services =>
+        {
+            services.AddSingleton<IInstalledApplicationCatalog>(catalog);
+            services.AddSingleton<IApplicationSearchWorkflowAutomation>(automation);
+        });
+        await host.StartAsync();
+        var client = new DesktopApiClient(environment.Options.PipeName);
+        var session = await client.StartNewSessionAsync("热榜歌曲范围");
+        var input = await client.SubmitSessionInputAsync(new(
+            "桌面上的网易云然后搜索最近最热的一首歌播放", "Text", "chart-scope", session.SessionId));
+        var waiting = await WaitForPhaseAsync(client, input.TurnId, "WaitingForConfirmation");
+        var application = catalog.ResolveByDisplayName("网易云音乐");
+        var expected = new ApplicationSearchWorkflow(application.Id, "最近最热的一首歌",
+            ApplicationSearchFollowUp.PlayFirst, MusicChart: ApplicationSearchWorkflow.NetEaseHotChart)
+            .ToCanonicalTarget(InstalledApplicationCatalog.CreateTargetBinding(application));
+        var turn = Assert.Single(waiting.Turns);
+        Assert.Equal(input.TurnId, turn.Id);
+        Assert.Equal("ApplicationSearch", turn.IntentKind);
+        Assert.Equal(expected, turn.PlanTarget);
+        Assert.Empty(automation.Calls);
+        await client.CancelSessionTurnAsync(session.SessionId, input.TurnId);
+        await host.StopAsync();
+    }
 
     [Fact]
     public async Task RealSessionProjectionPublishesExecutionStepsBeforeCompletion()
@@ -641,6 +671,8 @@ public sealed class ApplicationSearchWorkflowHostTests
     [InlineData("FollowUp")]
     [InlineData("LatestArtist")]
     [InlineData("LatestRemoved")]
+    [InlineData("ChartAdded")]
+    [InlineData("ChartRemoved")]
     public async Task ConfirmationCannotAuthorizeAReplannedDifferentWorkflow(string changedPart)
     {
         await using var environment = DesktopHostTestEnvironment.Create();
@@ -655,8 +687,9 @@ public sealed class ApplicationSearchWorkflowHostTests
         await host.StartAsync();
         var client = new DesktopApiClient(environment.Options.PipeName);
         var session = await client.StartNewSessionAsync("搜索确认范围");
-        var requestText = changedPart.StartsWith("Latest", StringComparison.Ordinal)
-            ? "打开网易云音乐并搜索周杰伦最新的歌" : SearchText;
+        var requestText = changedPart == "ChartRemoved" ? "打开网易云音乐并搜索热门歌曲"
+            : changedPart.StartsWith("Latest", StringComparison.Ordinal)
+                ? "打开网易云音乐并搜索周杰伦最新的歌" : SearchText;
         var submitted = await client.SubmitSessionInputAsync(new(requestText, "Text", "confirm-scope", session.SessionId));
         var waiting = await WaitForPhaseAsync(client, submitted.TurnId, "WaitingForConfirmation");
         var originalTarget = waiting.Turns.Single(t => t.Id == submitted.TurnId).PlanTarget;
@@ -896,6 +929,8 @@ public sealed class ApplicationSearchWorkflowHostTests
                 "FollowUp" => search with { FollowUp = "PlayFirst" },
                 "LatestArtist" => search with { LatestMusicArtist = "林俊杰" },
                 "LatestRemoved" => search with { LatestMusicArtist = null },
+                "ChartAdded" => search with { MusicChart = ApplicationSearchWorkflow.NetEaseHotChart },
+                "ChartRemoved" => search with { MusicChart = null },
                 _ => search
             } };
         }
@@ -925,6 +960,7 @@ public sealed class ApplicationSearchWorkflowHostTests
         public Exception? Error { get; init; }
         public bool ReturnUnverified { get; init; }
         public bool NoResults { get; init; }
+        public ApplicationSearchWorkflowResult? ResultOverride { get; init; }
         public Task<ApplicationSearchWorkflowResult> ExecuteAsync(KnownDesktopApplication application,
             string expectedBinding, ApplicationSearchWorkflow workflow, CancellationToken cancellationToken = default)
         {
@@ -932,6 +968,7 @@ public sealed class ApplicationSearchWorkflowHostTests
             Assert.True(InstalledApplicationCatalog.TargetBindingMatches(application, expectedBinding));
             Calls.Add(workflow);
             if (Error is not null) throw Error;
+            if (ResultOverride is not null) return Task.FromResult(ResultOverride);
             var followUp = workflow.FollowUp != ApplicationSearchFollowUp.None;
             var latest = workflow.LatestMusicArtist is { } artist
                 ? new LatestMusicResolution(artist, "测试新曲", new DateOnly(2026, 9, 1), ["测试新曲"],

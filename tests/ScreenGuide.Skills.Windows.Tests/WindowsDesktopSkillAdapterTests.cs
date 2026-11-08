@@ -3,7 +3,7 @@ using ScreenGuide.Skills.Abstractions;
 
 namespace ScreenGuide.Skills.Windows.Tests;
 
-public sealed class WindowsDesktopSkillAdapterTests
+public sealed partial class WindowsDesktopSkillAdapterTests
 {
     [Fact]
     public async Task ApplicationWorkflowReturnsOnlyStructuredVerifiedEvidence()

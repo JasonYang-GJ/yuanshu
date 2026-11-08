@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -54,7 +55,7 @@ public sealed class QwenChatModelProvider : IChatModelProvider
             new ChatModelDescriptor(
                 DefaultModelId,
                 "千问 3.7 Plus",
-                ChatModelCapabilities.Streaming | ChatModelCapabilities.JsonObjectOutput)
+                ChatModelCapabilities.Streaming | ChatModelCapabilities.JsonObjectOutput | ChatModelCapabilities.Vision)
         ],
         ChatProviderCredentialKind.ApiKey,
         ChatProviderWorkloads.OrdinaryChat);
@@ -373,6 +374,7 @@ public sealed class QwenChatModelProvider : IChatModelProvider
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         ArgumentNullException.ThrowIfNull(request);
+        request = ChatImageInputs.Prepare(request, ProviderId, supportsImages: true);
         ValidateRequest(request);
         var active = new ActiveCall();
         if (!_activeCalls.TryAdd(request.TurnId, active))
@@ -435,6 +437,9 @@ public sealed class QwenChatModelProvider : IChatModelProvider
         ChatModelStreamCallback? streamCallback,
         CancellationToken cancellationToken)
     {
+        // Copy image bytes before opening the short-lived credential lease.
+        // Caller disposal or serialization failure must not strand a lease.
+        var requestJson = BuildRequestJson(request);
         var lease = await _credentialStore.OpenLeaseAsync(ProviderId, cancellationToken)
             .ConfigureAwait(false);
         if (lease is null || lease.Secret.IsEmpty)
@@ -449,7 +454,7 @@ public sealed class QwenChatModelProvider : IChatModelProvider
 
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, ChatCompletionsEndpoint);
         httpRequest.Content = new StringContent(
-            BuildRequestJson(request),
+            requestJson,
             Encoding.UTF8,
             "application/json");
         httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
@@ -525,7 +530,7 @@ public sealed class QwenChatModelProvider : IChatModelProvider
                     ChatMessageRole.Assistant => "assistant",
                     _ => throw new InvalidOperationException("Qwen tool messages were not validated.")
                 },
-                ["content"] = message.Content
+                ["content"] = BuildMessageContent(message)
             });
         }
 
@@ -565,6 +570,24 @@ public sealed class QwenChatModelProvider : IChatModelProvider
         }
 
         return root.ToJsonString();
+    }
+
+    private static JsonNode BuildMessageContent(ChatMessage message)
+    {
+        if (message.Images is not { Count: > 0 }) return JsonValue.Create(message.Content)!;
+        var image = message.Images[0];
+        var copy = image.CopyPngBytes();
+        try
+        {
+            return new JsonArray(
+                new JsonObject { ["type"] = "text", ["text"] = message.Content },
+                new JsonObject
+                {
+                    ["type"] = "image_url",
+                    ["image_url"] = new JsonObject { ["url"] = "data:image/png;base64," + Convert.ToBase64String(copy) }
+                });
+        }
+        finally { CryptographicOperations.ZeroMemory(copy); }
     }
 
     private async Task<ChatModelResponse> ParseStreamingResponseAsync(

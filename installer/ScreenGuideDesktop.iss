@@ -48,8 +48,8 @@ Type: files; Name: "{group}\删除元枢用户数据.lnk"
 Type: files; Name: "{app}\Remove-ScreenGuideUserData.ps1"
 
 [Icons]
-Name: "{group}\元枢"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--paused"
-Name: "{userdesktop}\元枢"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--paused"
+Name: "{group}\元枢"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--assistant"; Comment: "打开元枢并开始语音；在可见助手中可随时暂停"
+Name: "{userdesktop}\元枢"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--assistant"; Comment: "打开元枢并开始语音；在可见助手中可随时暂停"
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--paused"; Description: "启动元枢（语音暂停）"; Flags: nowait postinstall skipifsilent

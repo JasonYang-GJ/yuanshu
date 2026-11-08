@@ -8,8 +8,14 @@ public sealed partial record ApplicationSearchRequest(
     string ApplicationName,
     string Query,
     string FollowUp = "None",
-    string? LatestMusicArtist = null)
+    string? LatestMusicArtist = null,
+    string? MusicChart = null)
 {
+    private const string HotMusicQueryPattern = @"(?:(?:最近|近期|当前|现在|目前)(?:的)?\s*)?(?:(?:一|1)首\s*)?(?:(?:最热门|最热|最火|热门|热度最高)(?:的)?\s*(?:(?:一|1)首\s*)?(?:歌曲|单曲|歌)|热歌)";
+    internal const string SearchFieldPattern = @"(?:搜索|文字|地址|输入)(?:框|栏)";
+    // Commit to a complete verb; the query itself may legitimately start with 框 or 栏.
+    internal const string SearchVerbPattern = @"(?>搜索|查找|搜一下|搜)(?:一下)?";
+
     internal static bool TryParse(string text, out ApplicationSearchRequest? request, out string? error)
     {
         request = null;
@@ -22,42 +28,27 @@ public sealed partial record ApplicationSearchRequest(
             match = LocalApplicationThenSearch().Match(text);
             opensApplication = match.Success;
         }
-        if (!match.Success) match = NamedSearch().Match(text);
+        if (!match.Success) match = MatchNamedSearch(text);
         if (!match.Success) return false;
         var application = match.Groups["app"].Value.Trim().Trim('“', '”', '"');
         // Contextual phrases continue to use the captured foreground window, not the installed catalog.
         if (!opensApplication && (application is "" or "当前窗口" or "这个窗口" or "当前软件" or "这个软件"
             or "当前应用" or "这个应用" or "当前页面" or "这个页面" or "浏览器" or "当前浏览器")) return false;
 
-        var remainder = match.Groups["query"].Value.Trim();
-        string query;
-        var followUp = "None";
-        var quotedQuery = remainder.StartsWith('“') || remainder.StartsWith('"');
-        if (quotedQuery)
+        if (application.Length is < 1 or > 80 || text.Any(char.IsControl)) return Invalid(out error);
+        var remainder = match.Groups["query"].Value.Trim().TrimEnd('。', '！', '!');
+        var hotMusic = HotMusicQuery().Match(remainder);
+        if (hotMusic.Success)
         {
-            var closing = remainder[0] == '“' ? '”' : '"';
-            var end = remainder.IndexOf(closing, 1);
-            if (end < 0) return Invalid(out error);
-            query = remainder[1..end];
-            var tail = remainder[(end + 1)..].Trim().TrimEnd('。', '！', '!');
-            if (tail.Length > 0 && !TryFollowUp(tail, out followUp)) return Invalid(out error);
+            request = new(application, hotMusic.Groups["query"].Value.Trim(),
+                hotMusic.Groups["play"].Success ? "PlayFirst" : "None", MusicChart: "NetEaseHotChart");
+            return true;
         }
-        else
-        {
-            remainder = remainder.TrimEnd('。', '！', '!');
-            var suffix = FollowUpSuffix().Match(remainder);
-            if (suffix.Success)
-            {
-                query = remainder[..suffix.Index].Trim();
-                followUp = suffix.Groups["verb"].Value == "播放" ? "PlayFirst" : "OpenFirst";
-            }
-            else query = remainder;
-            // Unquoted additional commands are not silently turned into authorized steps or search text.
-            if (AdditionalAction().IsMatch(query)) return Invalid(out error);
-        }
-        query = query.Trim().Normalize(NormalizationForm.FormKC);
-        if (application.Length is < 1 or > 80 || query.Length is < 1 or > 200
-            || text.Any(char.IsControl)) return Invalid(out error);
+        // 找 is admitted only for the complete bounded chart request, not arbitrary new actions.
+        if (match.Groups["musicFind"].Success || HotMusicPlaybackTail().IsMatch(remainder)) return Invalid(out error);
+        if (!TryParseQuery(remainder, allowFollowUp: true,
+                out var query, out var followUp, out var quotedQuery)) return Invalid(out error);
+        if (!quotedQuery && HotMusicQuery().IsMatch(query)) return Invalid(out error);
         if (!quotedQuery && LatestMusicWithoutArtist().IsMatch(query))
         {
             error = "请补充歌手名字，例如“在网易云里搜索周杰伦最新的歌”；我会按发行时间查找，不把“最新的歌”直接作为关键词。";
@@ -67,6 +58,42 @@ public sealed partial record ApplicationSearchRequest(
         if (error is not null) return true;
         request = new(application, query, followUp, latestArtist);
         return true;
+    }
+
+    internal static Match MatchNamedSearch(string text) => NamedSearch().Match(text);
+
+    internal static bool TryParseQuery(string remainder, bool allowFollowUp,
+        out string query, out string followUp, out bool quotedQuery)
+    {
+        query = string.Empty;
+        followUp = "None";
+        remainder = remainder.Trim();
+        quotedQuery = remainder.StartsWith('“') || remainder.StartsWith('"') || remainder.StartsWith('「');
+        if (remainder.Any(char.IsControl)) return false;
+        if (quotedQuery)
+        {
+            var closing = remainder[0] switch { '“' => '”', '「' => '」', _ => '"' };
+            var end = remainder.IndexOf(closing, 1);
+            if (end < 0) return false;
+            query = remainder[1..end];
+            var tail = remainder[(end + 1)..].Trim().TrimEnd('。', '！', '!');
+            if (tail.Length > 0 && (!allowFollowUp || !TryFollowUp(tail, out followUp))) return false;
+        }
+        else
+        {
+            remainder = remainder.TrimEnd('。', '！', '!');
+            var suffix = allowFollowUp ? FollowUpSuffix().Match(remainder) : Match.Empty;
+            if (suffix.Success)
+            {
+                query = remainder[..suffix.Index].Trim();
+                followUp = suffix.Groups["verb"].Value == "播放" ? "PlayFirst" : "OpenFirst";
+            }
+            else query = remainder;
+            // Unquoted additional commands are not silently turned into authorized steps or search text.
+            if (AdditionalAction().IsMatch(query)) return false;
+        }
+        query = query.Trim().Normalize(NormalizationForm.FormKC);
+        return query.Length is > 0 and <= 200;
     }
 
     private static string? ParseLatestMusicArtist(string query, out string? error)
@@ -97,8 +124,10 @@ public sealed partial record ApplicationSearchRequest(
 
     internal static string NormalizeSpokenActionLeadIn(string text)
     {
-        // Hesitations carry no authority. Remove at most two only when the
-        // remaining text already contains a supported explicit action.
+        // Hesitations and corrections carry no authority. Only remove bounded
+        // leading words when the remaining text itself names an explicit action.
+        var correction = SpokenActionCorrection().Match(text);
+        if (correction.Success) text = text[correction.Length..];
         var match = SpokenActionLeadIn().Match(text);
         return match.Success ? text[match.Length..] : text;
     }
@@ -158,16 +187,28 @@ public sealed partial record ApplicationSearchRequest(
         return true;
     }
 
-    [GeneratedRegex("^(?:(?:请帮我|帮我|给我|麻烦你|麻烦|请)\\s*){0,3}(?:打开|启动)(?:一下)?\\s*(?<app>.+?)(?:(?<sequence>[，,]\\s*(?:然后|并且|并|再|接着)?|\\s*(?:然后|并且|并|再|接着))|\\s*)\\s*(?:在(?:里面|里|其中))?(?:帮我|给我)?(?:搜索|查找|搜一下|搜)(?:一下)?\\s*(?<query>.*)$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex("^(?:(?:请帮我|帮我|给我|麻烦你|麻烦|请)\\s*){0,3}(?:打开|启动)(?:一下)?\\s*(?<app>.+?)(?:(?<sequence>[，,]\\s*(?:然后|并且|并|再|接着)?|\\s*(?:然后|并且|并|再|接着))|\\s*)\\s*(?:在(?:里面|里|其中))?(?:帮我|给我)?(?:(?:搜索|查找|搜一下|搜)(?:一下)?|(?<musicFind>找(?:一下)?))\\s*(?<query>.*)$", RegexOptions.CultureInvariant)]
     private static partial Regex OpenAndSearch();
 
     // Spoken commands often omit 打开 but retain a local target and an explicit
     // sequencing word. Never infer this from a mention in an arbitrary sentence.
-    [GeneratedRegex("^(?:(?:请帮我|帮我|给我|麻烦你|麻烦|请)\\s*){0,3}(?<app>(?:(?:我(?:的)?)?桌面(?:上)?(?:的)?|(?:我(?:的)?)?电脑(?:上|里)(?:的)?|我的)[^，,。！？?!“”\\\"「」]+?)(?:[，,]\\s*)?(?:然后|并且|并|再|接着)\\s*(?:在(?:里面|里|其中))?(?:帮我|给我)?(?:搜索|查找|搜一下|搜)(?:一下)?\\s*(?<query>.*)$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex("^(?:(?:请帮我|帮我|给我|麻烦你|麻烦|请)\\s*){0,3}(?<app>(?:(?:我(?:的)?)?桌面(?:上)?(?:的)?|(?:我(?:的)?)?电脑(?:上|里)(?:的)?|我的)[^，,。！？?!“”\\\"「」]+?)(?:[，,]\\s*)?(?:然后|并且|并|再|接着)\\s*(?:在(?:里面|里|其中))?(?:帮我|给我)?(?:(?:搜索|查找|搜一下|搜)(?:一下)?|(?<musicFind>找(?:一下)?))\\s*(?<query>.*)$", RegexOptions.CultureInvariant)]
     private static partial Regex LocalApplicationThenSearch();
 
-    [GeneratedRegex("^(?:请帮我|帮我|给我|麻烦你|请)?\\s*在(?<app>.{0,80}?)(?:里面|里|中|内)(?:请帮我|帮我|给我)?(?:搜索|查找|搜一下|搜)(?:一下)?\\s*(?<query>.*)$", RegexOptions.CultureInvariant)]
+    // Keep the established “在<完整应用名>里搜索” boundary, including app names
+    // ending in 搜索框/输入框. A field followed by 里/中/内 needs an explicit 的;
+    // without a location word, “在<应用>搜索框搜索” remains unambiguous field syntax.
+    [GeneratedRegex(@"^(?:请帮我|帮我|给我|麻烦你|麻烦|请)?\s*在\s*(?<app>[^\r\n]{0,80}?)(?:的\s*"
+        + SearchFieldPattern + @"\s*(?:里面|里|中|内)?|" + SearchFieldPattern
+        + @"|(?:里面|里|中|内))\s*(?:请帮我|帮我|给我)?"
+        + @"(?:" + SearchVerbPattern + @"|(?<musicFind>找(?:一下)?))\s*(?<query>.*)$", RegexOptions.CultureInvariant)]
     private static partial Regex NamedSearch();
+
+    [GeneratedRegex(@"^(?<query>" + HotMusicQueryPattern + @")(?:\s*(?:[，,]\s*)?(?:(?:然后|并且|并|再|接着)\s*)?(?:帮我|给我)?(?<play>播放)(?:第(?:一|1)(?:首|个)(?:歌曲|歌|结果)?)?)?$", RegexOptions.CultureInvariant)]
+    private static partial Regex HotMusicQuery();
+
+    [GeneratedRegex(@"^" + HotMusicQueryPattern + @"\s*播放", RegexOptions.CultureInvariant)]
+    private static partial Regex HotMusicPlaybackTail();
 
     [GeneratedRegex("(?:[，,]\\s*(?:然后|并且|并|再|接着)?|\\s*(?:然后|并且|并|再|接着))\\s*(?:帮我|给我)?(?<verb>打开|播放)(?:搜索结果中的?|搜索结果的?|结果中的?|结果的?)?第(?:一|1)(?:条|首|个)(?:结果|歌曲|歌|视频)?$", RegexOptions.CultureInvariant)]
     private static partial Regex FollowUpSuffix();
@@ -192,6 +233,9 @@ public sealed partial record ApplicationSearchRequest(
 
     [GeneratedRegex("^(?:(?:就是|那个|嗯|呃)[，, ]*){1,2}(?=(?:(?:请帮我|帮我|给我|麻烦你|麻烦|请)\\s*){0,3}(?:(?:打开|启动)(?:一下)?|在.{1,80}?(?:里面|里|中|内)(?:请帮我|帮我|给我)?(?:搜索|查找|搜一下|搜)))", RegexOptions.CultureInvariant)]
     private static partial Regex SpokenActionLeadIn();
+
+    [GeneratedRegex(@"^(?:不对[，, ]*)?(?:我说的是|我的意思是|我是说)[，,：: ]*(?=(?:(?:请帮我|帮我|给我|麻烦你|麻烦|请)\s*){0,3}(?:打开|启动|运行)(?:一下)?\s*[^\s])", RegexOptions.CultureInvariant)]
+    private static partial Regex SpokenActionCorrection();
 
     [GeneratedRegex("^(?:(?:就是|那个|嗯|呃)[，, ]*){0,2}我(?:刚才)?(?:看见|看到|见到)(?:(?:我(?:的)?)?桌面(?:上)?(?:的)?|(?:我(?:的)?)?电脑(?:上|里)(?:的)?).{1,80}?(?:[，,]\\s*)?(?:然后|并且|并|再|接着)\\s*(?:搜索|查找|搜一下|搜)(?:一下)?[^\\p{Cc}。！？?!]{0,200}[。！! ]*$", RegexOptions.CultureInvariant)]
     private static partial Regex ObservedApplicationThenSearch();

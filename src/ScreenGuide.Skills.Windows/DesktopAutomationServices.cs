@@ -146,6 +146,13 @@ internal interface IPreparedNativeSearchAutomation
         DesktopSearchControl? locator, CancellationToken cancellationToken);
 }
 
+internal interface IBoundApplicationSearchAutomation
+{
+    DesktopAutomationResult SearchBoundApplication(ForegroundWindowSnapshot window, string query,
+        DesktopSearchControl? locator, Func<CancellationToken, ForegroundWindowSnapshot> validateWindow,
+        CancellationToken cancellationToken);
+}
+
 internal interface IDesktopSearchAutomationDriver
 {
     bool IsWindow(long windowHandle);
@@ -178,15 +185,26 @@ internal sealed class SafeForegroundSearchExecutor(
     private const int MinimumConfidence = 100;
 
     internal static bool IsReliableCandidate(DesktopSearchControlSnapshot snapshot, long expectedWindowHandle) =>
-        IsSafe(snapshot, expectedWindowHandle) && Score(snapshot) >= MinimumConfidence;
+        IsSafe(snapshot, expectedWindowHandle) && HasStrongSearchEvidence(snapshot);
 
     public DesktopAutomationResult Search(ForegroundWindowSnapshot expectedWindow, string query, CancellationToken cancellationToken = default)
+        => SearchCore(expectedWindow, query, null, cancellationToken);
+
+    internal DesktopAutomationResult SearchBoundApplication(ForegroundWindowSnapshot expectedWindow, string query,
+        Func<CancellationToken, ForegroundWindowSnapshot> validateWindow, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(validateWindow);
+        return SearchCore(expectedWindow, query, validateWindow, cancellationToken);
+    }
+
+    private DesktopAutomationResult SearchCore(ForegroundWindowSnapshot expectedWindow, string query,
+        Func<CancellationToken, ForegroundWindowSnapshot>? validateWindow, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(expectedWindow);
         var normalizedQuery = DesktopSearchQuery.NormalizeAndValidate(query);
 
-        RequireWindow(expectedWindow);
+        RequireSearchWindow(expectedWindow, cancellationToken);
         if (!driver.IsWindow(expectedWindow.WindowHandle))
         {
             throw Changed();
@@ -197,7 +215,7 @@ internal sealed class SafeForegroundSearchExecutor(
             throw Changed();
         }
 
-        RequireWindowAndForeground(expectedWindow);
+        RequireSearchWindowAndForeground(expectedWindow, cancellationToken);
         IReadOnlyList<DesktopSearchControl> discovered;
         try
         {
@@ -208,7 +226,7 @@ internal sealed class SafeForegroundSearchExecutor(
             throw Changed();
         }
 
-        RequireWindowAndForeground(expectedWindow);
+        RequireSearchWindowAndForeground(expectedWindow, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         // Multiple UIA proxies may describe one IA2 node. Merge only independently bound native identities.
         var uniqueControls = discovered.GroupBy(control => string.IsNullOrEmpty(control.Snapshot.NativeSearchIdentity)
@@ -221,7 +239,7 @@ internal sealed class SafeForegroundSearchExecutor(
                 return first;
             });
         var safeCandidates = uniqueControls
-            .Where(control => IsSafe(control.Snapshot, expectedWindow.WindowHandle))
+            .Where(control => IsReliableCandidate(control.Snapshot, expectedWindow.WindowHandle))
             .Select(control => new ScoredControl(control, Score(control.Snapshot)))
             .ToArray();
         if (safeCandidates.Length == 0)
@@ -231,16 +249,15 @@ internal sealed class SafeForegroundSearchExecutor(
                 "没有找到可可靠写入的搜索或地址栏，因此没有输入任何内容。 ");
         }
 
-        var highestScore = safeCandidates.Max(item => item.Score);
-        var highest = safeCandidates.Where(item => item.Score == highestScore).ToArray();
-        if (highestScore < MinimumConfidence || highest.Length != 1)
+        if (safeCandidates.Length != 1)
         {
             throw new DesktopSearchException(
                 DesktopSearchErrorCodes.CandidateAmbiguous,
                 "无法唯一确认安全的搜索或地址栏，因此没有输入任何内容。 ");
         }
 
-        var selected = highest[0].Control;
+        var selected = safeCandidates[0].Control;
+        var confidence = safeCandidates[0].Score;
         var bound = selected.Snapshot;
         var beforeFocus = ReadAndRequireBoundTarget(selected, bound, expectedWindow.WindowHandle);
         if (!IsSafe(beforeFocus, expectedWindow.WindowHandle))
@@ -254,10 +271,11 @@ internal sealed class SafeForegroundSearchExecutor(
             driver.Focus(selected, () =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                RequireWindowAndForeground(expectedWindow);
+                RequireSearchWindowAndForeground(expectedWindow, cancellationToken);
             });
-            RequireWindowAndForeground(expectedWindow);
+            RequireSearchWindowAndForeground(expectedWindow, cancellationToken);
             var beforeWrite = ReadAndRequireBoundTarget(selected, bound, expectedWindow.WindowHandle);
+            RequireSearchWindowAndForeground(expectedWindow, cancellationToken);
             if (!beforeWrite.HasKeyboardFocus)
             {
                 throw FocusChanged();
@@ -270,8 +288,9 @@ internal sealed class SafeForegroundSearchExecutor(
             do
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                RequireWindowAndForeground(expectedWindow);
+                RequireSearchWindowAndForeground(expectedWindow, cancellationToken);
                 afterWrite = ReadAndRequireBoundTarget(selected, bound, expectedWindow.WindowHandle, allowPendingSearchContainer: true);
+                RequireSearchWindowAndForeground(expectedWindow, cancellationToken);
                 if (!afterWrite.HasKeyboardFocus) throw FocusChanged();
                 if (!(bound.HasNativeSearchSemantics && afterWrite.NativeSearchContainerPending)
                     && string.Equals(afterWrite.Value, normalizedQuery, StringComparison.Ordinal)) break;
@@ -291,7 +310,7 @@ internal sealed class SafeForegroundSearchExecutor(
                     "搜索内容没有被精确写入，因此没有提交。 ");
             }
 
-            RequireWindowAndForeground(expectedWindow);
+            RequireSearchWindowAndForeground(expectedWindow, cancellationToken);
             var beforeSubmit = ReadAndRequireBoundTarget(selected, bound, expectedWindow.WindowHandle);
             if (!beforeSubmit.HasKeyboardFocus)
             {
@@ -308,11 +327,12 @@ internal sealed class SafeForegroundSearchExecutor(
             driver.SubmitEnter(selected, () =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                RequireWindowAndForeground(expectedWindow);
+                RequireSearchWindowAndForeground(expectedWindow, cancellationToken);
                 var atSendBoundary = ReadAndRequireBoundTarget(
                     selected,
                     bound,
                     expectedWindow.WindowHandle);
+                RequireSearchWindowAndForeground(expectedWindow, cancellationToken);
                 if (!atSendBoundary.HasKeyboardFocus)
                 {
                     throw FocusChanged();
@@ -334,6 +354,10 @@ internal sealed class SafeForegroundSearchExecutor(
         {
             throw;
         }
+        catch (ApplicationSearchWorkflowException)
+        {
+            throw;
+        }
         catch (Exception exception) when (IsVolatileAutomationFailure(exception))
         {
             throw Changed();
@@ -342,7 +366,7 @@ internal sealed class SafeForegroundSearchExecutor(
         return new DesktopAutomationResult(
             true,
             "已确认内容写入唯一识别的搜索框并提交；搜索结果页面尚未验证。",
-            $"UniqueCandidate=true; Confidence={highestScore}; ExactValueVerified=true; SubmitCount=1")
+            $"UniqueCandidate=true; Confidence={confidence}; ExactValueVerified=true; SubmitCount=1")
         {
             VerifySubmittedInput = bound.HasNativeSearchSemantics && bound.NativeSearchIdentity.Length > 0
                 ? VerifySubmittedInput : null
@@ -356,10 +380,10 @@ internal sealed class SafeForegroundSearchExecutor(
                     currentWindow with { WindowTitle = expectedWindow.WindowTitle })) return false;
             try
             {
-                RequireWindowAndForeground(currentWindow);
+                RequireSearchWindowAndForeground(currentWindow, token);
                 var current = ReadAndRequireBoundTarget(selected, bound, expectedWindow.WindowHandle);
                 token.ThrowIfCancellationRequested();
-                RequireWindowAndForeground(currentWindow);
+                RequireSearchWindowAndForeground(currentWindow, token);
                 return IsReliableCandidate(current, expectedWindow.WindowHandle)
                     && current.HasNativeSearchSemantics && !current.NativeSearchContainerPending
                     && current.Value == normalizedQuery;
@@ -370,21 +394,36 @@ internal sealed class SafeForegroundSearchExecutor(
                 return false;
             }
         }
+
+        void RequireSearchWindow(ForegroundWindowSnapshot reference, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            cancellationToken.ThrowIfCancellationRequested();
+            if (validateWindow is null)
+            {
+                RequireWindow(reference);
+                return;
+            }
+            // Only the application workflow can provide this live validator. It rechecks
+            // its original registered target, process lifetime, native path and foreground.
+            // A changing title carries no new authority; every other identity stays exact.
+            var current = validateWindow(token);
+            WindowIdentityContract.RequireMatch(reference, current with { WindowTitle = reference.WindowTitle });
+            token.ThrowIfCancellationRequested();
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        void RequireSearchWindowAndForeground(ForegroundWindowSnapshot reference, CancellationToken token)
+        {
+            RequireSearchWindow(reference, token);
+            if (driver.GetForegroundWindowHandle() != reference.WindowHandle) throw Changed();
+        }
     }
 
     private void RequireWindow(ForegroundWindowSnapshot expectedWindow) =>
         WindowIdentityContract.RequireMatch(
             expectedWindow,
             foregroundWindows.ResolveWindow(expectedWindow.WindowHandle));
-
-    private void RequireWindowAndForeground(ForegroundWindowSnapshot expectedWindow)
-    {
-        RequireWindow(expectedWindow);
-        if (driver.GetForegroundWindowHandle() != expectedWindow.WindowHandle)
-        {
-            throw Changed();
-        }
-    }
 
     private DesktopSearchControlSnapshot ReadAndRequireBoundTarget(
         DesktopSearchControl control,
@@ -443,6 +482,13 @@ internal sealed class SafeForegroundSearchExecutor(
         + ScoreEvidence(snapshot.LabeledBy, 20)
         + ScoreEvidence(snapshot.AutomationId, 10)
         + ScoreEvidence(snapshot.HelpText, 0);
+
+    private static bool HasStrongSearchEvidence(DesktopSearchControlSnapshot snapshot) =>
+        // Internal IDs and help text can describe an unrelated embedded webpage
+        // field. They may corroborate a search input, never establish one alone.
+        snapshot.HasNativeSearchSemantics && !string.IsNullOrEmpty(snapshot.NativeSearchIdentity)
+        || ScoreEvidence(snapshot.Name, 0) >= MinimumConfidence
+        || ScoreEvidence(snapshot.LabeledBy, 0) >= MinimumConfidence;
 
     private static int ScoreEvidence(string value, int sourceBonus)
     {
@@ -656,7 +702,8 @@ public sealed class ForegroundWindowTracker : IForegroundWindowContextProvider, 
     private static extern int GetWindowTextLength(IntPtr hWnd);
 }
 
-public sealed class WindowsUiAutomationService : IReliableDesktopAutomation, IPreparedNativeSearchAutomation
+public sealed class WindowsUiAutomationService : IReliableDesktopAutomation, IPreparedNativeSearchAutomation,
+    IBoundApplicationSearchAutomation
 {
     private readonly IForegroundWindowContextProvider _foregroundWindows;
     private readonly SafeForegroundSearchExecutor _searchExecutor;
@@ -700,6 +747,18 @@ public sealed class WindowsUiAutomationService : IReliableDesktopAutomation, IPr
             ? new SafeForegroundSearchExecutor(_foregroundWindows, new WindowsDesktopSearchAutomationDriver(locator))
                 .Search(window, query, cancellationToken)
             : _searchExecutor.Search(window, query, cancellationToken);
+
+    DesktopAutomationResult IBoundApplicationSearchAutomation.SearchBoundApplication(ForegroundWindowSnapshot window,
+        string query, DesktopSearchControl? locator, Func<CancellationToken, ForegroundWindowSnapshot> validateWindow,
+        CancellationToken cancellationToken) => SearchBoundApplication(window, query, locator, validateWindow, cancellationToken);
+
+    internal DesktopAutomationResult SearchBoundApplication(ForegroundWindowSnapshot window, string query,
+        DesktopSearchControl? locator, Func<CancellationToken, ForegroundWindowSnapshot> validateWindow,
+        CancellationToken cancellationToken)
+        => _usesDefaultNativeDriver && locator is not null
+            ? new SafeForegroundSearchExecutor(_foregroundWindows, new WindowsDesktopSearchAutomationDriver(locator))
+                .SearchBoundApplication(window, query, validateWindow, cancellationToken)
+            : _searchExecutor.SearchBoundApplication(window, query, validateWindow, cancellationToken);
 
     public DesktopAutomationResult Describe(ForegroundWindowSnapshot expectedWindow)
     {

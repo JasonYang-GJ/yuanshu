@@ -589,7 +589,8 @@ public sealed class DesktopApiDispatcher(
             request.SessionId,
             request.TurnId,
             request.Granted,
-            cancellationToken);
+            cancellationToken,
+            request.ConsentId);
 
     private Task<LocalSessionSnapshot> RetrySessionTurnAsync(
         CancelSessionTurnRequestDto request,
@@ -858,7 +859,7 @@ public sealed class DesktopApiDispatcher(
             "单条会话内容过大，无法安全显示。");
     }
 
-    private static SessionSnapshotDto? MapSession(LocalSessionSnapshot? snapshot)
+    private SessionSnapshotDto? MapSession(LocalSessionSnapshot? snapshot)
     {
         if (snapshot is null)
         {
@@ -946,7 +947,7 @@ public sealed class DesktopApiDispatcher(
         return FitSnapshotBudget(response);
     }
 
-    private static UnifiedSessionTurnDto MapSessionTurn(SessionTurnRecord turn) => new(
+    private UnifiedSessionTurnDto MapSessionTurn(SessionTurnRecord turn) => new(
         turn.Id,
         turn.SequenceNumber,
         turn.InputText,
@@ -963,7 +964,7 @@ public sealed class DesktopApiDispatcher(
         turn.WindowTitle,
         turn.RequiresConfirmation,
         turn.CancellationRequested,
-        turn.ResultSummary,
+        sessions.GetDesktopTaskConsentDescription(turn) ?? turn.ResultSummary,
         turn.FailureMessage,
         turn.CreatedAtUtc,
         turn.UpdatedAtUtc,
@@ -973,7 +974,8 @@ public sealed class DesktopApiDispatcher(
         turn.PlanTarget,
         turn.MemoryOutboundState.ToString(),
         turn.MemoryOutbound?.ConsentId,
-        turn.MemoryOutbound?.ManifestHash);
+        turn.MemoryOutbound?.ManifestHash,
+        sessions.GetWindowConsent(turn));
 
     private static ConversationMessageDto MapConversationMessage(ConversationMessageRecord message) => new(
         message.Id,

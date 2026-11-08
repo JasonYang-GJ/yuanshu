@@ -268,6 +268,8 @@ public static class R4QwenRunnerExecution
             var invocations = host.Services.GetRequiredService<IAiInvocationStore>();
             var sessions = host.Services.GetRequiredService<ISessionStore>();
             var conversations = host.Services.GetRequiredService<IConversationStore>();
+            var expectedPrompt = host.Services.GetRequiredService<PromptRegistry>()
+                .GetRequired("chat.general", "4", QwenChatModelProvider.ProviderId);
             var session = await api.StartNewSessionAsync("R4 Qwen isolated acceptance", token)
                 .ConfigureAwait(false);
 
@@ -308,6 +310,7 @@ public static class R4QwenRunnerExecution
                 await invocations.GetForSessionTurnAsync(ordinary.TurnId, token).ConfigureAwait(false),
                 provider,
                 ordinaryTurn,
+                expectedPrompt,
                 AiInvocationStatus.Succeeded,
                 requireUsage: true,
                 requireProviderRequestId: true);
@@ -335,6 +338,7 @@ public static class R4QwenRunnerExecution
                     conversations,
                     invocations,
                     provider,
+                    expectedPrompt,
                     options.Budget,
                     session.SessionId,
                     assistantMessageIdsBeforeCancellation,
@@ -475,6 +479,7 @@ public static class R4QwenRunnerExecution
         IConversationStore conversations,
         IAiInvocationStore invocations,
         R4QwenBudgetedChatModelProvider provider,
+        PromptDefinition expectedPrompt,
         R4QwenValidationBudget budget,
         Guid sessionId,
         IReadOnlySet<Guid> assistantMessageIdsBeforeCancellation,
@@ -557,6 +562,7 @@ public static class R4QwenRunnerExecution
                 .ConfigureAwait(false),
             provider,
             turn,
+            expectedPrompt,
             AiInvocationStatus.Cancelled,
             requireUsage: false,
             requireProviderRequestId: false);
@@ -592,10 +598,11 @@ public static class R4QwenRunnerExecution
             lateSuccessRejected);
     }
 
-    private static AiInvocationRecord RequireConversationInvocation(
+    internal static AiInvocationRecord RequireConversationInvocation(
         IReadOnlyList<AiInvocationRecord> records,
         R4QwenBudgetedChatModelProvider provider,
         UnifiedSessionTurnDto turn,
+        PromptDefinition expectedPrompt,
         AiInvocationStatus expectedStatus,
         bool requireUsage,
         bool requireProviderRequestId)
@@ -610,9 +617,9 @@ public static class R4QwenRunnerExecution
                       && identity.ModelId == QwenChatModelProvider.DefaultModelId
                       && invocation.DataDestination == QwenChatModelProvider.DataDestination
                       && invocation.Status == expectedStatus
-                      && invocation.PromptId == "chat.general"
-                      && invocation.PromptVersion == "1"
-                      && !string.IsNullOrWhiteSpace(invocation.PromptContentHash)
+                      && invocation.PromptId == expectedPrompt.PromptId
+                      && invocation.PromptVersion == expectedPrompt.Version
+                      && invocation.PromptContentHash == expectedPrompt.ContentSha256
                       && invocation.StartedAtUtc != default
                       && invocation.CompletedAtUtc is not null
                       && (requireUsage ? invocation.Usage is not null : invocation.Usage is null)

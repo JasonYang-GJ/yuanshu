@@ -9,6 +9,20 @@ namespace ScreenGuide.Agent.Codex.Tests;
 public sealed class CodexChatModelProviderTests
 {
     [Fact]
+    public async Task ImagesCannotBeDroppedIntoAPlainTextCliRequestEvenUnderTheTestOnlyPolicy()
+    {
+        await using var environment = ChatProviderEnvironment.Create();
+        await using var provider = environment.CreateProvider();
+        using var image = new ChatImage(Convert.FromBase64String(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGP4/x8AAwAB//wl3FEAAAAASUVORK5CYII="));
+        var error = await Assert.ThrowsAsync<ChatModelException>(() => provider.CompleteAsync(Request(
+            Guid.NewGuid(), "system", new ChatMessage(ChatMessageRole.User, "synthetic", Images: [image]))));
+        Assert.Equal("chat.vision_not_supported", error.Error.Code);
+        Assert.False(Directory.Exists(environment.DataDirectory));
+        Assert.False(image.IsDisposed);
+    }
+
+    [Fact]
     public async Task ProductionPolicyFailsClosedBeforeCodexCliOrFilesystemAccess()
     {
         var root = Path.Combine(

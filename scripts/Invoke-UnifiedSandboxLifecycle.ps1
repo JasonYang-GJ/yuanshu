@@ -95,7 +95,7 @@ function Assert-Candidate {
         Assert-Condition (Test-Path -LiteralPath $linkPath -PathType Leaf) 'unified_lifecycle_entry_missing'
         $link = $shell.CreateShortcut($linkPath)
         Assert-Condition ($link.TargetPath -ieq (Join-Path $installRoot 'ScreenGuide.DesktopClient.exe') -and
-            $link.Arguments -ceq '--paused') 'unified_lifecycle_entry_not_paused'
+            $link.Arguments -ceq '--assistant') 'unified_lifecycle_entry_not_explicit_voice'
     }
     Assert-Condition (-not (Test-Path -LiteralPath (Join-Path $menuRoot ($legacyCleanupName + '.lnk')))) 'unified_lifecycle_legacy_cleanup_entry_retained'
     $runValues = if (Test-Path -LiteralPath $runKey) { Get-ItemProperty -LiteralPath $runKey } else { $null }

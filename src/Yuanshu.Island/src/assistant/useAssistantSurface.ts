@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { needsExpandedSurface, type AssistantSnapshot } from "./protocol";
 import type { IslandMode } from "../hooks/useIslandController";
+import { isVisualConsentActuallyVisible } from "./visibleConsent";
 
 export const RESULT_HOLD_MS = 6500;
 export function useAssistantSurface(integrated: boolean, snapshot: AssistantSnapshot | null, mode: IslandMode, expand: () => void, collapse: () => void, interactive = false, dragging = false) {
@@ -40,7 +41,9 @@ export function useAssistantPresented(snapshot: AssistantSnapshot | null, poll: 
     let second = 0;
     let cancelled = false;
     const first = requestAnimationFrame(() => {
-      second = requestAnimationFrame(() => { if (!cancelled) void presented(snapshot); });
+      second = requestAnimationFrame(() => {
+        if (!cancelled && isVisualConsentActuallyVisible(snapshot)) void presented(snapshot);
+      });
     });
     return () => { cancelled = true; cancelAnimationFrame(first); cancelAnimationFrame(second); };
   }, [snapshot, poll, ready, presented]);

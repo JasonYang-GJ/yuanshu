@@ -6,6 +6,24 @@ namespace ScreenGuide.DesktopClient.Tests;
 public sealed class VoiceSessionControllerTests
 {
     [Fact]
+    public async Task StopBeforeListenerExistsRevokesPendingLaunchWithoutStartingCapture()
+    {
+        var voice = new ControlledVoice();
+        await using var session = new VoiceSessionController(voice);
+        var launchVersion = session.StopVersion;
+        await session.StopAsync();
+        Assert.NotEqual(launchVersion, session.StopVersion);
+        Assert.Equal(0, voice.StartCalls);
+        Assert.False(session.IsListening);
+
+        var nextLaunchVersion = session.StopVersion;
+        await session.StartAsync();
+        await session.StartAsync();
+        Assert.Equal(nextLaunchVersion, session.StopVersion);
+        Assert.Equal(1, voice.StartCalls);
+    }
+
+    [Fact]
     public async Task OpeningAndRefreshingNeverGrantsMicrophoneConsent()
     {
         var voice = new ControlledVoice();

@@ -5,7 +5,8 @@ namespace ScreenGuide.Core.Ai;
 public enum AiInvocationPurpose
 {
     Conversation,
-    SemanticIntent
+    SemanticIntent,
+    DesktopTaskPlanning
 }
 
 public enum AiInvocationStatus

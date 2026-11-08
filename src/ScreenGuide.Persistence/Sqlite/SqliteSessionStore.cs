@@ -461,7 +461,8 @@ public sealed class SqliteSessionStore : ISessionStore
             query.Transaction = transaction;
             query.CommandText = """
                 SELECT id FROM session_turns
-                WHERE phase IN ('Understanding', 'Responding', 'Executing', 'ObservingWindow', 'ProgrammingTask', 'WaitingForUser', 'WaitingForMemoryOutboundConsent', 'WaitingForPointerAnswerConsent');
+                WHERE phase IN ('Understanding', 'Responding', 'Executing', 'ObservingWindow', 'ProgrammingTask', 'WaitingForUser', 'WaitingForMemoryOutboundConsent', 'WaitingForPointerAnswerConsent')
+                   OR (phase = 'WaitingForWindowConsent' AND failure_code IN ('visual_search_consent_required', 'desktop_task_consent_required'));
                 """;
             await using var reader = await query.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -485,7 +486,8 @@ public sealed class SqliteSessionStore : ISessionStore
                     END,
                     completed_at_utc = $recoveredAtUtc, updated_at_utc = $recoveredAtUtc,
                     version = version + 1
-                WHERE phase IN ('Understanding', 'Responding', 'Executing', 'ObservingWindow', 'ProgrammingTask', 'WaitingForUser', 'WaitingForMemoryOutboundConsent', 'WaitingForPointerAnswerConsent');
+                WHERE phase IN ('Understanding', 'Responding', 'Executing', 'ObservingWindow', 'ProgrammingTask', 'WaitingForUser', 'WaitingForMemoryOutboundConsent', 'WaitingForPointerAnswerConsent')
+                   OR (phase = 'WaitingForWindowConsent' AND failure_code IN ('visual_search_consent_required', 'desktop_task_consent_required'));
 
                 UPDATE session_turns
                 SET phase = 'WaitingForWindow', missing_context = 'Window',

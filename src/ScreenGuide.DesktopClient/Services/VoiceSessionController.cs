@@ -21,6 +21,7 @@ public sealed class VoiceSessionController : IAsyncDisposable
     private Task? _stopTask;
     private bool _disposed;
     private long _generation;
+    private long _stopVersion;
     private VoiceSessionStatus _status = new(VoiceSessionState.Off, "语音未开启");
 
     public VoiceSessionController(IContinuousVoiceListener voice, TimeSpan? startupTimeout = null)
@@ -32,6 +33,8 @@ public sealed class VoiceSessionController : IAsyncDisposable
 
     public event EventHandler<VoiceSessionStatus>? StateChanged;
     public VoiceSessionStatus Status { get { lock (_sync) return _status; } }
+    // A stop also revokes a launch still waiting for its visible surface/initialization.
+    public long StopVersion { get { lock (_sync) return _stopVersion; } }
     public bool IsListening => Status.State is VoiceSessionState.Listening or VoiceSessionState.HearingSpeech;
     public long? ListeningGeneration
     {
@@ -147,6 +150,7 @@ public sealed class VoiceSessionController : IAsyncDisposable
         TaskCompletionSource completion;
         lock (_sync)
         {
+            _stopVersion++;
             if (_stopTask is { IsCompleted: false }) return _stopTask;
             attempt = _attempt;
             if (attempt is null) return Task.CompletedTask;

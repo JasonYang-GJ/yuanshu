@@ -20,6 +20,8 @@ public sealed record ApplicationSearchWorkflowResult(
     string Summary)
 {
     public LatestMusicResolution? LatestMusic { get; init; }
+    public HotMusicResolution? HotMusic { get; init; }
+    public string SubmissionMode { get; init; } = "Enter";
 }
 
 public interface IApplicationSearchWorkflowAutomation
@@ -49,6 +51,11 @@ internal interface IApplicationSearchWorkflowDriver
     ForegroundWindowSnapshot RequireBound(KnownDesktopApplication application, ForegroundWindowSnapshot window, CancellationToken cancellationToken);
     void PrepareSearch(ForegroundWindowSnapshot window, CancellationToken cancellationToken) { }
     void Search(ForegroundWindowSnapshot window, string query, CancellationToken cancellationToken);
+    void Search(ForegroundWindowSnapshot window, string query, Action validateTarget, CancellationToken cancellationToken)
+    {
+        validateTarget();
+        Search(window, query, cancellationToken);
+    }
     SearchResultPage ReadResults(ForegroundWindowSnapshot window, string query, CancellationToken cancellationToken);
     void Invoke(ForegroundWindowSnapshot window, SearchResultPage page, ApplicationSearchFollowUp followUp, Action validateAtInvoke, CancellationToken cancellationToken);
     bool VerifyFollowUp(ForegroundWindowSnapshot window, SearchResultItem item, ApplicationSearchFollowUp followUp, CancellationToken cancellationToken);
@@ -61,6 +68,9 @@ public sealed class WindowsApplicationSearchWorkflowAutomation : IApplicationSea
     private readonly TimeSpan _verificationTimeout;
     private readonly ILatestMusicResolver _latestMusic;
     private readonly IApplicationSearchProgressSink? _progress;
+    private readonly IVisualSearchAutomation? _visualSearch;
+    private readonly IHotMusicResolver _hotMusic;
+    private readonly INetEaseSongPlayback _musicPlayback;
 
     public WindowsApplicationSearchWorkflowAutomation(
         IDesktopProcessLauncher launcher,
@@ -68,13 +78,19 @@ public sealed class WindowsApplicationSearchWorkflowAutomation : IApplicationSea
         IReliableDesktopAutomation automation,
         IForegroundWindowContextProvider foregroundWindows,
         ILatestMusicResolver? latestMusic = null,
-        IApplicationSearchProgressSink? progress = null)
+        IApplicationSearchProgressSink? progress = null,
+        IVisualSearchAutomation? visualSearch = null,
+        IHotMusicResolver? hotMusic = null,
+        INetEaseSongPlayback? musicPlayback = null)
     {
         _applications = applications;
         _createDriver = () => new WindowsSearchResultDriver(launcher, automation, foregroundWindows);
         _verificationTimeout = TimeSpan.FromSeconds(12);
         _latestMusic = latestMusic ?? new LatestMusicResolver();
         _progress = progress;
+        _visualSearch = visualSearch;
+        _hotMusic = hotMusic ?? new HotMusicResolver();
+        _musicPlayback = musicPlayback ?? new NetEaseSongPlayback();
     }
 
     internal WindowsApplicationSearchWorkflowAutomation(
@@ -82,13 +98,19 @@ public sealed class WindowsApplicationSearchWorkflowAutomation : IApplicationSea
         IApplicationSearchWorkflowDriver driver,
         TimeSpan verificationTimeout,
         ILatestMusicResolver? latestMusic = null,
-        IApplicationSearchProgressSink? progress = null)
+        IApplicationSearchProgressSink? progress = null,
+        IVisualSearchAutomation? visualSearch = null,
+        IHotMusicResolver? hotMusic = null,
+        INetEaseSongPlayback? musicPlayback = null)
     {
         _applications = applications;
         _createDriver = () => driver;
         _verificationTimeout = verificationTimeout;
         _latestMusic = latestMusic ?? new LatestMusicResolver();
         _progress = progress;
+        _visualSearch = visualSearch;
+        _hotMusic = hotMusic ?? new HotMusicResolver();
+        _musicPlayback = musicPlayback ?? new NetEaseSongPlayback();
     }
 
     public async Task<ApplicationSearchWorkflowResult> ExecuteAsync(
@@ -103,10 +125,12 @@ public sealed class WindowsApplicationSearchWorkflowAutomation : IApplicationSea
         RequireApplication();
         ForegroundWindowSnapshot window = null!;
         LatestMusicResolution? latestMusic = null;
+        HotMusicResolution? hotMusic = null;
         Task<LatestMusicResolution>? lookup = null;
-        using var lookupCancellation = workflow.LatestMusicArtist is null ? null
+        Task<HotMusicResolution>? hotLookup = null;
+        using var lookupCancellation = workflow.LatestMusicArtist is null && workflow.MusicChart is null ? null
             : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var lookupDuringLaunch = workflow.LatestMusicArtist is not null
+        var lookupDuringLaunch = (workflow.LatestMusicArtist is not null || workflow.MusicChart is not null)
             && Path.IsPathFullyQualified(application.LaunchTarget)
             && string.Equals(Path.GetFileName(application.LaunchTarget), "cloudmusic.exe", StringComparison.OrdinalIgnoreCase);
         try
@@ -134,18 +158,47 @@ public sealed class WindowsApplicationSearchWorkflowAutomation : IApplicationSea
                 RequireWindow();
                 query = DesktopSearchQuery.NormalizeAndValidate(latestMusic.SearchQuery);
             }
+            if (workflow.MusicChart is not null)
+            {
+                if (!NetEaseSearchPageReader.Applies(window))
+                    throw Failure("hot_music_application_unsupported", "热歌榜连续播放目前支持网易云音乐。");
+                await ReportAsync(ApplicationSearchStage.ResolvingHotMusic).ConfigureAwait(false);
+                StartLookup();
+                driver.PrepareSearch(window, cancellationToken);
+                hotMusic = await hotLookup!.ConfigureAwait(false);
+                RequireWindow();
+                query = DesktopSearchQuery.NormalizeAndValidate(hotMusic.SearchQuery);
+            }
         }
         finally
         {
-            if (lookup is not null)
+            if (lookup is not null || hotLookup is not null)
             {
                 await lookupCancellation!.CancelAsync().ConfigureAwait(false);
-                try { await lookup.ConfigureAwait(false); } catch { /* Observe late metadata without replacing the original failure. */ }
+                try { if (lookup is not null) await lookup.ConfigureAwait(false); } catch { /* Observe without replacing the original failure. */ }
+                try { if (hotLookup is not null) await hotLookup.ConfigureAwait(false); } catch { /* Observe without replacing the original failure. */ }
             }
         }
         await ReportAsync(ApplicationSearchStage.Searching).ConfigureAwait(false);
         RequireWindow();
-        driver.Search(window, query, cancellationToken);
+        try
+        {
+            driver.Search(window, query, RequireWindow, cancellationToken);
+        }
+        catch (DesktopSearchException exception) when (
+            exception.Code == DesktopSearchErrorCodes.CandidateNotFound
+            && _visualSearch is not null && workflow.FollowUp == ApplicationSearchFollowUp.None
+            && workflow.LatestMusicArtist is null && workflow.MusicChart is null)
+        {
+            RequireWindow();
+            var visual = await _visualSearch.SearchAsync(window, query, cancellationToken, RequireWindow)
+                .ConfigureAwait(false);
+            RequireWindow();
+            if (!visual.ApplicationVerified || !visual.QuerySubmitted || !visual.ResultsVerified
+                || visual.FollowUpInvoked || visual.FollowUpVerified || visual.SubmissionMode != "LiveFilter")
+                throw Failure("application_search_incomplete", "视觉搜索没有完成必要核对，不能标记为成功。");
+            return visual;
+        }
         RequireWindow();
         await ReportAsync(ApplicationSearchStage.VerifyingResults).ConfigureAwait(false);
         var timer = Stopwatch.StartNew();
@@ -171,14 +224,33 @@ public sealed class WindowsApplicationSearchWorkflowAutomation : IApplicationSea
                 throw Failure("application_search_no_results", "已确认搜索没有结果，因此没有继续打开或播放。");
             return new(true, true, true, true, false, false,
                 latestMusic is null ? "已打开应用、提交搜索，并确认没有匹配的结果。" : DescribeLatest(latestMusic, true))
-                { LatestMusic = latestMusic };
+                { LatestMusic = latestMusic, HotMusic = hotMusic };
         }
         if (page.Items.Count == 0)
             throw Failure("application_search_results_unverified", "已提交搜索，但结果列表暂时无法可靠读取；没有继续操作。");
         if (workflow.FollowUp == ApplicationSearchFollowUp.None)
             return new(true, true, true, false, false, false,
-                latestMusic is null ? "已打开应用、提交搜索，并确认当前显示该关键词的结果列表。" : DescribeLatest(latestMusic, false))
-                { LatestMusic = latestMusic };
+                hotMusic is not null ? $"已搜索网易云热歌榜第 1 名《{hotMusic.Title}》。"
+                    : latestMusic is null ? "已打开应用、提交搜索，并确认当前显示该关键词的结果列表。" : DescribeLatest(latestMusic, false))
+                { LatestMusic = latestMusic, HotMusic = hotMusic };
+
+        if (hotMusic is not null)
+        {
+            if (workflow.FollowUp != ApplicationSearchFollowUp.PlayFirst)
+                throw Failure("hot_music_followup_unsupported", "已完成热歌搜索；本次热榜后续动作仅支持明确要求播放。");
+            if (!page.Items.Any(item => string.Equals(item.Title.Trim().Normalize(), hotMusic.Title.Trim().Normalize(), StringComparison.Ordinal)))
+                throw Failure("hot_music_result_unverified", "搜索结果未核对到本次榜单歌曲，尚未发起播放。");
+            RequireWindow();
+            await ReportAsync(ApplicationSearchStage.PlayingMusic).ConfigureAwait(false);
+            var played = await _musicPlayback.PlayAsync(application, window, hotMusic, RequireWindow, cancellationToken)
+                .ConfigureAwait(false);
+            RequireWindow();
+            if (!played.Verified)
+                throw Failure("music_playback_not_verified", "尚未核对到本次歌曲正在播放。");
+            return new(true, true, true, false, true, true,
+                $"已在网易云{(played.IsPreview ? "开始试听" : "播放")}《{hotMusic.Title}》—{string.Join("、", hotMusic.Artists.Select(artist => artist.Name))}（热歌榜第 1 名）。")
+                { HotMusic = hotMusic };
+        }
 
         // A dated catalog match cannot authorize the first UI card: it could be a cover.
         if (latestMusic is not null)
@@ -209,7 +281,10 @@ public sealed class WindowsApplicationSearchWorkflowAutomation : IApplicationSea
         void StartLookup()
         {
             RequireApplication();
-            lookup ??= _latestMusic.ResolveAsync(workflow.LatestMusicArtist!, lookupCancellation!.Token);
+            if (workflow.MusicChart is not null)
+                hotLookup ??= _hotMusic.ResolveAsync(lookupCancellation!.Token);
+            else
+                lookup ??= _latestMusic.ResolveAsync(workflow.LatestMusicArtist!, lookupCancellation!.Token);
         }
         void RequireApplication()
         {

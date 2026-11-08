@@ -134,7 +134,8 @@ public interface IDesktopApiClient
         Guid sessionId,
         Guid turnId,
         bool granted,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        Guid? consentId = null);
 
     Task<SessionSnapshotDto> RetrySessionTurnAsync(
         Guid sessionId,
@@ -489,10 +490,11 @@ public sealed class DesktopApiClient(
         Guid sessionId,
         Guid turnId,
         bool granted,
-        CancellationToken cancellationToken = default) =>
+        CancellationToken cancellationToken = default,
+        Guid? consentId = null) =>
         CallAsync<SessionWindowConsentRequestDto, SessionSnapshotDto>(
             DesktopApiMethods.RespondSessionWindowConsent,
-            new SessionWindowConsentRequestDto(sessionId, turnId, granted),
+            new SessionWindowConsentRequestDto(sessionId, turnId, granted, consentId),
             cancellationToken);
 
     public Task<SessionSnapshotDto> RetrySessionTurnAsync(

@@ -58,4 +58,18 @@ foreach ($scriptName in @('UnifiedInstallerLifecycle.Common.ps1', 'New-UnifiedSa
     if ($errors.Count -gt 0) { throw ($errors | Out-String) }
     $count++
 }
+$installer = Get-Content -LiteralPath (Join-Path $repoRoot 'installer\ScreenGuideDesktop.iss') -Raw
+$icons = [regex]::Match($installer, '(?ms)^\[Icons\]\r?\n(?<section>.*?)(?=^\[)').Groups['section'].Value
+foreach ($entry in @('{group}\元枢', '{userdesktop}\元枢')) {
+    $line = @($icons -split '\r?\n' | Where-Object { $_.StartsWith('Name: "' + $entry + '";') })
+    if ($line.Count -ne 1 -or $line[0] -notmatch 'Parameters: "--assistant";') {
+        throw 'unified_installer_manual_entry_must_request_voice'
+    }
+    $count++
+}
+$run = [regex]::Match($installer, '(?ms)^\[Run\]\r?\n(?<section>.*?)(?=^\[)').Groups['section'].Value
+if ($run -notmatch 'Parameters: "--paused";' -or $run -match 'Parameters: "--assistant"') {
+    throw 'unified_installer_postinstall_must_not_request_voice'
+}
+$count++
 [ordered]@{ passed = $true; checks = $count; nativeInstallerExecutions = 0; scope = 'contract-and-host-refusal-only' } | ConvertTo-Json -Compress

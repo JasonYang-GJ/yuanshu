@@ -152,6 +152,50 @@ public sealed class DesktopProductServicesTests
         }
     }
 
+    [Theory]
+    [InlineData(false, true, false, true)]
+    [InlineData(false, false, false, false)]
+    [InlineData(true, false, true, false)]
+    [InlineData(true, true, true, false)]
+    public async Task ReopeningPreservesVoiceIntentAndManagementNeverGrantsIt(
+        bool management, bool voice, bool expectedManagement, bool expectedVoice)
+    {
+        const string variable = "SCREEN_GUIDE_PIPE_NAME";
+        var previous = Environment.GetEnvironmentVariable(variable);
+        Environment.SetEnvironmentVariable(variable, $"ScreenGuide.Activation.Tests.{Guid.NewGuid():N}");
+        try
+        {
+            using var first = DesktopClientSingleInstance.TryAcquire();
+            Assert.NotNull(first);
+            var activated = new TaskCompletionSource<DesktopActivationRequest>(TaskCreationOptions.RunContinuationsAsynchronously);
+            first.SetActivationRequestHandler(request => activated.TrySetResult(request));
+            Assert.True(await DesktopClientSingleInstance.TrySignalExistingAsync(
+                showManagement: management, startListening: voice));
+            var received = await activated.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.Equal(new DesktopActivationRequest(expectedManagement, expectedVoice), received);
+        }
+        finally { Environment.SetEnvironmentVariable(variable, previous); }
+    }
+
+    [Fact]
+    public async Task ReopeningWhileStartupLoadsRetainsTheExplicitVoiceIntent()
+    {
+        const string variable = "SCREEN_GUIDE_PIPE_NAME";
+        var previous = Environment.GetEnvironmentVariable(variable);
+        Environment.SetEnvironmentVariable(variable, $"ScreenGuide.Activation.Tests.{Guid.NewGuid():N}");
+        try
+        {
+            using var first = DesktopClientSingleInstance.TryAcquire();
+            Assert.NotNull(first);
+            Assert.True(await DesktopClientSingleInstance.TrySignalExistingAsync(startListening: true));
+            var activated = new TaskCompletionSource<DesktopActivationRequest>(TaskCreationOptions.RunContinuationsAsynchronously);
+            first.SetActivationRequestHandler(request => activated.TrySetResult(request));
+            var received = await activated.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.Equal(new DesktopActivationRequest(false, true), received);
+        }
+        finally { Environment.SetEnvironmentVariable(variable, previous); }
+    }
+
     [Fact]
     public void HostStartupFailureMapsToPlainDatabaseRecoveryMessage()
     {

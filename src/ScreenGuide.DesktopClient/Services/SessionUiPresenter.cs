@@ -50,22 +50,31 @@ public static class SessionUiPresenter
                    ?? snapshot.Turns.OrderBy(item => item.SequenceNumber).LastOrDefault();
         var phase = turn?.Phase ?? "Ready";
         var status = PhaseText(phase);
-        if (phase == "Executing" && turn?.IntentKind == "ApplicationSearch"
+        if (phase == "Executing" && turn?.IntentKind is "ApplicationSearch" or "DesktopTask"
             && !string.IsNullOrWhiteSpace(turn.ResultSummary))
             status = (turn.ResultSummary, "Busy");
         var waitingProject = phase == "WaitingForProject";
         var waitingFile = phase == "WaitingForFile";
         var waitingWindow = phase == "WaitingForWindow";
         var waitingConsent = phase == "WaitingForWindowConsent";
+        var visualSearchConsent = waitingConsent && turn?.IntentKind is "ApplicationSearch" or "SearchForeground";
+        var resultReadConsent = visualSearchConsent && turn?.WindowConsent?.Purpose == "ResultRead";
+        var desktopTaskConsent = waitingConsent && turn?.IntentKind == "DesktopTask";
+        var desktopTaskStep = desktopTaskConsent && turn?.WindowConsent?.Purpose == "TaskAction";
+        if (desktopTaskConsent) status = (desktopTaskStep ? "请确认当前这一步的具体操作" : "请允许本次软件任务读取必要窗口文字", "Waiting");
+        if (visualSearchConsent) status = (resultReadConsent
+            ? "需要你允许只读核对临时窗口中的搜索结果"
+            : "需要你允许查看窗口并执行这次搜索", "Waiting");
         var waitingConfirmation = phase == "WaitingForConfirmation";
         var context = waitingProject || waitingFile || waitingWindow || waitingConsent || waitingConfirmation;
         var terminal = phase is "Completed" or "Cancelled" or "Failed" or "Interrupted";
-        var target = string.IsNullOrWhiteSpace(turn?.WindowTitle)
+        var windowTitle = turn?.WindowConsent?.WindowTitle ?? turn?.WindowTitle;
+        var target = string.IsNullOrWhiteSpace(windowTitle)
             ? string.Empty
-            : $"\n目标窗口：{turn.WindowTitle}";
+            : $"\n目标窗口：{windowTitle}";
         var detail = turn is null
             ? "当前话题会在应用重启后继续保留。"
-            : $"{turn.ResultSummary ?? turn.FailureMessage ?? string.Empty}{target}".Trim();
+            : $"{ResultText(turn) ?? string.Empty}{target}".Trim();
         return new SessionUiPresentation(
             snapshot.Title,
             snapshot.SelectedProjectName is null
@@ -75,7 +84,7 @@ public static class SessionUiPresenter
             status.Tone,
             turn?.InputText ?? string.Empty,
             detail,
-            phase is "Understanding" or "Responding" or "Executing" or "ObservingWindow",
+            visualSearchConsent || desktopTaskConsent || phase is "Understanding" or "Responding" or "Executing" or "ObservingWindow",
             waitingProject,
             waitingFile,
             waitingWindow,
@@ -83,7 +92,9 @@ public static class SessionUiPresenter
             waitingConfirmation,
             context,
             terminal || phase == "ProgrammingTask" || phase == "WaitingForUser",
-            PrimaryActionText(phase),
+            desktopTaskStep ? "仅确认当前这一步" : desktopTaskConsent ? "允许本次任务读取并操作这个窗口"
+                : resultReadConsent ? "仅允许读取这次搜索结果"
+                : visualSearchConsent ? "允许查看并搜索这一次" : PrimaryActionText(phase),
             waitingConsent ? "拒绝并结束" : "取消这条请求");
     }
 
@@ -107,6 +118,10 @@ public static class SessionUiPresenter
         && string.Equals(turn.IntentKind, expectedIntentKind, StringComparison.Ordinal)
         && string.Equals(turn.ExpectedTarget, expectedTarget, StringComparison.Ordinal)
         && string.Equals(turn.PlanTarget, expectedTarget, StringComparison.Ordinal);
+
+    public static string? ResultText(UnifiedSessionTurnDto turn) =>
+        turn.Phase == "Failed" && !string.IsNullOrWhiteSpace(turn.FailureMessage)
+            ? turn.FailureMessage : turn.ResultSummary ?? turn.FailureMessage;
 
     private static (string Text, string Tone) PhaseText(string phase) => phase switch
     {

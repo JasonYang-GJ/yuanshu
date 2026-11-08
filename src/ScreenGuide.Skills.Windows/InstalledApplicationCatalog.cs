@@ -38,9 +38,11 @@ public static class InstalledApplicationErrorCodes
 
 public sealed class InstalledApplicationResolutionException(
     string code,
-    string message) : InvalidOperationException(message)
+    string message,
+    IReadOnlyList<string>? suggestedNames = null) : InvalidOperationException(message)
 {
     public string Code { get; } = code;
+    public IReadOnlyList<string> SuggestedNames { get; } = suggestedNames ?? [];
 }
 
 public interface IInstalledApplicationCatalog
@@ -147,7 +149,8 @@ public sealed class InstalledApplicationCatalog : IInstalledApplicationCatalog
             ["夸克"] = new(["夸克浏览器", "Quark"], ["quark.exe"]),
             ["夸克浏览器"] = new(["夸克浏览器", "Quark"], ["quark.exe"]),
             ["剪映"] = new(["剪映专业版"], ["jianying.exe", "JianyingPro.exe"]),
-            ["网易云"] = new(["网易云音乐"], ["cloudmusic.exe"])
+            ["网易云"] = new(["网易云音乐"], ["cloudmusic.exe"]),
+            ["斯蒂姆"] = new(["Steam"], ["steam.exe"])
         };
 
     private readonly object _sync = new();
@@ -379,6 +382,7 @@ public sealed class InstalledApplicationCatalog : IInstalledApplicationCatalog
         foreach (var qualifier in new[]
                  {
                      "我的电脑桌面上的", "我电脑桌面上的", "电脑桌面上的",
+                     "我见到桌面上的", "我看到桌面上的", "我看见桌面上的",
                      "我的桌面上的", "我桌面上的", "桌面上的",
                      "我的桌面的", "我桌面的", "桌面的", "桌面上",
                      "我电脑上的", "我电脑里的", "我的电脑上的", "我的电脑里的",
@@ -419,8 +423,8 @@ public sealed class InstalledApplicationCatalog : IInstalledApplicationCatalog
         // Settings pages are reachable only through their exact fixed names/aliases above.
         var ordinaryApplications = applications.Where(item =>
             !item.Id.StartsWith("windows-settings", StringComparison.Ordinal)).ToArray();
-        var prefix = MatchByName(ordinaryApplications, requested, static (name, query) =>
-            name.StartsWith(query, StringComparison.OrdinalIgnoreCase));
+        var prefix = ordinaryApplications.Where(item => ApplicationNames(item)
+            .Any(name => MatchesPartialName(name, requested, prefixOnly: true))).ToArray();
         if (prefix.Length > 0)
         {
             return RequireUnique(prefix);
@@ -428,15 +432,73 @@ public sealed class InstalledApplicationCatalog : IInstalledApplicationCatalog
 
         if (requested.Length >= 2)
         {
-            var contains = MatchByName(ordinaryApplications, requested, static (name, query) =>
-                name.Contains(query, StringComparison.OrdinalIgnoreCase));
+            var contains = ordinaryApplications.Where(item => ApplicationNames(item)
+                .Any(name => MatchesPartialName(name, requested, prefixOnly: false))).ToArray();
             if (contains.Length > 0)
             {
                 return RequireUnique(contains);
             }
         }
 
-        throw NotFound();
+        // Suggestions are explanation only: never return a guessed application,
+        // bind its ID, or treat speech similarity as permission to execute it.
+        var suggestions = requested.Length is >= 4 and <= 80 && requested.All(char.IsAsciiLetterOrDigit)
+            ? ordinaryApplications.Where(item => ApplicationNames(item)
+                    .Any(name => IsOneEditApart(requested, NormalizeDisplayName(name))))
+                .Select(item => item.DisplayName)
+                .Where(name => name.Length is > 0 and <= 80 && !name.Any(char.IsControl))
+                .Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).Take(3).ToArray()
+            : [];
+        throw suggestions.Length == 0 ? NotFound() : new InstalledApplicationResolutionException(
+            InstalledApplicationErrorCodes.NotFound,
+            $"没有找到名称准确匹配的应用。你可能想打开：{string.Join("、", suggestions)}。"
+            + "请按完整名称重新说打开指令；本次没有打开任何程序。", suggestions);
+    }
+
+    private static bool MatchesPartialName(string name, string requested, bool prefixOnly)
+    {
+        var raw = name.Trim().Normalize(NormalizationForm.FormKC);
+        var normalized = new StringBuilder(raw.Length);
+        var positions = new List<int>(raw.Length);
+        for (var i = 0; i < raw.Length; i++)
+        {
+            if (!IsNameCharacter(raw[i])) continue;
+            normalized.Append(raw[i]);
+            positions.Add(i);
+        }
+        var candidate = normalized.ToString();
+        for (var start = candidate.IndexOf(requested, StringComparison.OrdinalIgnoreCase);
+             start >= 0;
+             start = candidate.IndexOf(requested, start + 1, StringComparison.OrdinalIgnoreCase))
+        {
+            if (prefixOnly && start != 0) return false;
+            var first = positions[start];
+            var last = positions[start + requested.Length - 1];
+            // Preserve boundaries before normalizing punctuation/spaces away.
+            // "Chrome" can match "Google Chrome"; "STEM" cannot match "System".
+            if (char.IsAsciiLetterOrDigit(requested[0]) && first > 0
+                && char.IsAsciiLetterOrDigit(raw[first - 1])) continue;
+            if (char.IsAsciiLetterOrDigit(requested[^1]) && last + 1 < raw.Length
+                && char.IsAsciiLetterOrDigit(raw[last + 1])) continue;
+            return true;
+        }
+        return false;
+    }
+
+    private static bool IsOneEditApart(string left, string right)
+    {
+        if (Math.Abs(left.Length - right.Length) > 1 || !right.All(char.IsAsciiLetterOrDigit)) return false;
+        var i = 0;
+        var j = 0;
+        var edits = 0;
+        while (i < left.Length && j < right.Length)
+        {
+            if (char.ToUpperInvariant(left[i]) == char.ToUpperInvariant(right[j])) { i++; j++; continue; }
+            if (++edits > 1) return false;
+            if (left.Length >= right.Length) i++;
+            if (right.Length >= left.Length) j++;
+        }
+        return edits + left.Length - i + right.Length - j == 1;
     }
 
     private static KnownDesktopApplication[] MatchByName(
@@ -1263,9 +1325,7 @@ public sealed class InstalledApplicationCatalog : IInstalledApplicationCatalog
         var builder = new StringBuilder(normalized.Length);
         foreach (var character in normalized)
         {
-            var category = CharUnicodeInfo.GetUnicodeCategory(character);
-            if (char.IsLetterOrDigit(character)
-                || category is UnicodeCategory.NonSpacingMark or UnicodeCategory.SpacingCombiningMark)
+            if (IsNameCharacter(character))
             {
                 builder.Append(character);
             }
@@ -1273,6 +1333,9 @@ public sealed class InstalledApplicationCatalog : IInstalledApplicationCatalog
 
         return builder.ToString();
     }
+
+    private static bool IsNameCharacter(char character) => char.IsLetterOrDigit(character)
+        || CharUnicodeInfo.GetUnicodeCategory(character) is UnicodeCategory.NonSpacingMark or UnicodeCategory.SpacingCombiningMark;
 
     private static string StableId(string value)
     {

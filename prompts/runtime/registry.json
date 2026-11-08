@@ -7,7 +7,9 @@
       "purpose": "chat",
       "contentFile": "chat/general.v1.md",
       "sha256": "0F55CF72A947E18862D6453034062B0E89E29D5D68DB3847F4384C7E198CB7F8",
-      "providerIds": ["*"],
+      "providerIds": [
+        "*"
+      ],
       "createdAtUtc": "2026-08-24T00:00:00Z",
       "changeReason": "建立供应商无关的普通聊天安全边界。"
     },
@@ -17,9 +19,35 @@
       "purpose": "chat-with-user-selected-memory",
       "contentFile": "chat/general.v2.md",
       "sha256": "82A414F8A3E829F957BA77614A993C908119D8C6A499C1B4717E2139DF656B67",
-      "providerIds": ["*"],
+      "providerIds": [
+        "*"
+      ],
       "createdAtUtc": "2026-08-30T00:00:00Z",
       "changeReason": "为用户逐 Turn 明确选择并确认的本机记忆建立不可信参考数据边界。"
+    },
+    {
+      "id": "chat.general",
+      "version": "3",
+      "purpose": "concise-chat-with-optional-user-selected-memory",
+      "contentFile": "chat/general.v3.md",
+      "sha256": "08A2DF50AAEBB677D727299C7C5B745DAF261BA06E9B2C66070125560F588013",
+      "providerIds": [
+        "*"
+      ],
+      "createdAtUtc": "2026-11-02T00:00:00Z",
+      "changeReason": "默认一句简短直接答复，仅按当前问题使用历史；保留显式详细请求、普通聊天权限和所选记忆边界。"
+    },
+    {
+      "id": "chat.general",
+      "version": "4",
+      "purpose": "concise-chat-with-bounded-product-capabilities-and-optional-memory",
+      "contentFile": "chat/general.v4.md",
+      "sha256": "8AB0FCC9572BA621CC38598CFEC62AFC448B0D2FC20F8EFEF29A6F9DA799C394",
+      "providerIds": [
+        "*"
+      ],
+      "createdAtUtc": "2026-11-05T00:00:00Z",
+      "changeReason": "区分本轮未执行操作与元枢已有的有限电脑操作能力，给出具体指令引导；保留聊天无执行权、记忆不可信及简短回复规则。"
     },
     {
       "id": "intent.semantic",
@@ -27,9 +55,35 @@
       "purpose": "semantic-intent-suggestion",
       "contentFile": "intent/semantic.v1.md",
       "sha256": "F7D5E48D71906C427CEBADEE5C0E63FFABA953BBD904E0A10B4A56EC001D6C08",
-      "providerIds": ["*"],
+      "providerIds": [
+        "*"
+      ],
       "createdAtUtc": "2026-08-24T00:00:00Z",
       "changeReason": "建立只建议、不授权的供应商无关语义意图分类边界。"
+    },
+    {
+      "id": "desktop.task-step",
+      "version": "1",
+      "purpose": "untrusted-desktop-task-step-proposal",
+      "contentFile": "desktop/task-step.v1.md",
+      "sha256": "1E5A7BB2315C72C2E0F7242B91CA4842DB484FB184EDE17CA9BD84ADE95FBA15",
+      "providerIds": [
+        "*"
+      ],
+      "createdAtUtc": "2026-11-04T00:00:00Z",
+      "changeReason": "为桌面任务建立单步提案和真实结果边界；将历史动作状态明确为已调用，依据新快照继续，禁止以验证为由重放累加动作，状态不符时询问。"
+    },
+    {
+      "id": "desktop.task-step",
+      "version": "2",
+      "purpose": "untrusted-desktop-task-step-proposal",
+      "contentFile": "desktop/task-step.v2.md",
+      "sha256": "21180C773AB47A5626981990D10CD3BD7F3A11A671DDC5FECB55BC68BEE5F544",
+      "providerIds": [
+        "*"
+      ],
+      "createdAtUtc": "2026-11-05T00:00:00Z",
+      "changeReason": "实测多字段填写后模型把原文证据写成value=内容而被拒绝；明确name/value直接摘录、仅state保留键值格式，多目标逐项核对但不拼接证据，保持严格解析与权限边界。"
     },
     {
       "id": "window.pointer.answer",
@@ -37,9 +91,33 @@
       "purpose": "pointer-region-text-answer",
       "contentFile": "window/pointer-answer.v1.md",
       "sha256": "8136B489DBE4B9FBF5CEDEA9DA0106257A15706414EDD5EC20C704F79E5DF6F8",
-      "providerIds": ["*"],
+      "providerIds": [
+        "*"
+      ],
       "createdAtUtc": "2026-09-01T00:00:00Z",
       "changeReason": "为逐 Turn 明确确认的本机指针区域 OCR 文本建立供应商无关、无图片的回答边界。"
+    },
+    {
+      "id": "desktop.visual-step",
+      "version": "1",
+      "purpose": "untrusted-visual-desktop-task-step-proposal",
+      "contentFile": "desktop/visual-step.v1.md",
+      "sha256": "B3C2EFB7D1F903A5D756D23CDDDE389F1555FC869B1782A192C0B77660419263",
+      "providerIds": [
+        "*"
+      ],
+      "createdAtUtc": "2026-11-05T00:00:00Z",
+      "changeReason": "在明确单窗口图片许可后，根据实际截图提议有限步骤；图片及OCR不授予权限，结果需新画面OCR证据，不替代本机确认与窗口校验。"
+    },
+    {
+      "id": "desktop.visual-step",
+      "version": "2",
+      "purpose": "untrusted-visual-desktop-task-step-proposal",
+      "contentFile": "desktop/visual-step.v2.md",
+      "sha256": "AA87D0F879EDC035809F8F71F2D55D775341D4E8825B30E1A509B9AD6AFDAF32",
+      "providerIds": ["*"],
+      "createdAtUtc": "2026-11-05T00:00:00Z",
+      "changeReason": "真实Qwen定位使用相对坐标；明确normalized1000标记并在本机按可信截图尺寸转换，禁止猜测坐标空间。"
     }
   ]
 }

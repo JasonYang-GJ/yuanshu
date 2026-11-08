@@ -101,6 +101,17 @@ internal sealed class WindowsSearchResultDriver(
     }
 
     public void Search(ForegroundWindowSnapshot window, string query, CancellationToken cancellationToken)
+        => SearchCore(window, query, null, cancellationToken);
+
+    public void Search(ForegroundWindowSnapshot window, string query, Action validateTarget,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(validateTarget);
+        SearchCore(window, query, validateTarget, cancellationToken);
+    }
+
+    private void SearchCore(ForegroundWindowSnapshot window, string query, Action? validateTarget,
+        CancellationToken cancellationToken)
     {
         _submittedInputReadback = null;
         var prepared = _nativeInputPrepared;
@@ -125,10 +136,26 @@ internal sealed class WindowsSearchResultDriver(
         void RefreshBeforeInput()
         {
             // Reading a starting app's result metadata can outlast a title transition.
-            // Refresh only before discovery/input, retaining this Open's exact window,
-            // process lifetime, registered executable and foreground authority. The
-            // automation's strict title guard still applies throughout the actual write.
-            searchWindow = RequireBound(application, openedWindow, cancellationToken);
+            searchWindow = ValidateSearchWindow(cancellationToken);
+        }
+        ForegroundWindowSnapshot ValidateSearchWindow(CancellationToken boundaryToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            boundaryToken.ThrowIfCancellationRequested();
+            // The production workflow rechecks its exact ApplicationId and catalog target
+            // binding at every input boundary. Independently retain this Open's HWND,
+            // process lifetime, registered native path and foreground authority here.
+            validateTarget?.Invoke();
+            return RequireBound(application, openedWindow, boundaryToken);
+        }
+        DesktopAutomationResult Submit()
+        {
+            if (automation is IBoundApplicationSearchAutomation boundAutomation)
+                return boundAutomation.SearchBoundApplication(searchWindow, query,
+                    requiresNativeReadiness ? locator : null, ValidateSearchWindow, cancellationToken);
+            return requiresNativeReadiness && automation is IPreparedNativeSearchAutomation nativeAutomation
+                ? nativeAutomation.SearchWithPreparationLocator(searchWindow, query, locator, cancellationToken)
+                : automation.Search(searchWindow, query, cancellationToken);
         }
         DesktopAutomationResult result;
         if (requiresNativeReadiness)
@@ -136,12 +163,9 @@ internal sealed class WindowsSearchResultDriver(
             RefreshBeforeInput();
             // All startup retries above are read-only. Once actual search begins, even a
             // discovery failure stops this native workflow instead of trying input again.
-            result = automation is IPreparedNativeSearchAutomation nativeAutomation
-                ? nativeAutomation.SearchWithPreparationLocator(searchWindow, query, locator, cancellationToken)
-                : automation.Search(searchWindow, query, cancellationToken);
+            result = Submit();
         }
-        else result = SubmitWithDiscoveryRetry(() => automation.Search(searchWindow, query, cancellationToken),
-            RefreshBeforeInput, cancellationToken);
+        else result = SubmitWithDiscoveryRetry(Submit, RefreshBeforeInput, cancellationToken);
         if (!result.Verified)
             throw Failure("application_search_submission_unverified", "无法确认搜索提交，已停止后续操作。");
         _submittedInputReadback = result.VerifySubmittedInput;

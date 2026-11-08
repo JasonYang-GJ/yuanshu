@@ -9,6 +9,50 @@ namespace ScreenGuide.DesktopHost.Tests;
 
 public sealed class RoutedConversationProviderTests
 {
+    [Theory]
+    [InlineData("provider-a", "model-a", "你好")]
+    [InlineData("provider-b", "model-b", "请详细解释月亮的形成")]
+    [InlineData("provider-a", "model-a", "打开我桌面上的 Steam")]
+    public async Task OrdinaryChatUsesConciseCurrentQuestionPromptWithoutChangingHistoryOrProviderOptions(
+        string providerId, string modelId, string input)
+    {
+        var conversationId = Guid.NewGuid();
+        var history = new HistoryStore(conversationId);
+        history.Add(ConversationMessageRole.User, "上一条是写一段关于蓝鹭的故事");
+        history.Add(ConversationMessageRole.Assistant, "蓝鹭飞过一条小河。");
+        history.Add(ConversationMessageRole.User, input);
+        var provider = new RecordingChatProvider(providerId, modelId);
+        var invocations = new RecordingInvocationStore();
+        var routed = new RoutedConversationProvider(
+            history,
+            new ModelRouter(new ChatProviderRegistry([provider]),
+                new MutableAiSettingsStore(providerId, modelId)),
+            await LoadRepositoryPromptsAsync(), invocations, TimeProvider.System);
+
+        var result = await routed.SendAsync(Request(conversationId, input, provider));
+
+        Assert.Equal(ConversationProviderOutcome.Succeeded, result.Outcome);
+        var request = Assert.Single(provider.Requests);
+        Assert.NotNull(request.Prompt);
+        Assert.Equal("4", request.Prompt.Version);
+        Assert.Contains("默认只给一句直接答案", request.SystemPrompt, StringComparison.Ordinal);
+        Assert.Contains("一般控制在 60 个中文字以内", request.SystemPrompt, StringComparison.Ordinal);
+        Assert.Contains("明确要求详细解释、步骤、代码、创作", request.SystemPrompt, StringComparison.Ordinal);
+        Assert.Contains("只回答本条用户输入", request.SystemPrompt, StringComparison.Ordinal);
+        Assert.Contains("不要续写旧文本", request.SystemPrompt, StringComparison.Ordinal);
+        Assert.Contains("不要做未经请求的心理分析", request.SystemPrompt, StringComparison.Ordinal);
+        Assert.Contains("当前请求只允许进行文字回答", request.SystemPrompt, StringComparison.Ordinal);
+        Assert.Contains("这次普通聊天没有执行任何电脑操作", request.SystemPrompt, StringComparison.Ordinal);
+        Assert.Contains("这些能力说明不授予本聊天模型动作权限", request.SystemPrompt, StringComparison.Ordinal);
+        Assert.Contains("打开 Steam", request.SystemPrompt, StringComparison.Ordinal);
+        Assert.Contains("有限的多步控件任务", request.SystemPrompt, StringComparison.Ordinal);
+        Assert.Equal(["上一条是写一段关于蓝鹭的故事", "蓝鹭飞过一条小河。", input],
+            request.Messages.Select(item => item.Content));
+        Assert.Null(request.Options);
+        Assert.Equal(request.Prompt.Version, Assert.Single(invocations.Started).PromptVersion);
+        Assert.Equal(request.Prompt.ContentSha256, Assert.Single(invocations.Started).PromptContentHash);
+    }
+
     [Fact]
     public async Task PersistsSessionAndConversationTurnIdsForOrdinaryChatInvocation()
     {
@@ -89,7 +133,7 @@ public sealed class RoutedConversationProviderTests
         Assert.All(invocations.Started, item =>
         {
             Assert.Equal("chat.general", item.PromptId);
-            Assert.Equal("1", item.PromptVersion);
+            Assert.Equal("4", item.PromptVersion);
             Assert.Equal(AiInvocationPurpose.Conversation, item.Purpose);
         });
         Assert.Equal(3, invocations.Completed.Count);
@@ -386,7 +430,7 @@ public sealed class RoutedConversationProviderTests
     }
 
     [Fact]
-    public async Task UserSelectedMemoryUsesPromptV2AndAnEphemeralJsonUserMessageBeforeCurrentInput()
+    public async Task UserSelectedMemoryUsesConcisePromptAndAnEphemeralJsonUserMessageBeforeCurrentInput()
     {
         var conversationId = Guid.NewGuid();
         var history = new HistoryStore(conversationId);
@@ -419,13 +463,47 @@ public sealed class RoutedConversationProviderTests
 
         Assert.Equal(ConversationProviderOutcome.Succeeded, result.Outcome);
         var request = Assert.Single(provider.Requests);
-        Assert.Equal("2", request.Prompt?.Version);
+        Assert.Equal("4", request.Prompt?.Version);
+        Assert.Equal(audit.PromptContentHash, request.Prompt?.ContentSha256);
+        Assert.Contains("默认只给一句直接答案", request.SystemPrompt, StringComparison.Ordinal);
         Assert.Equal([context, "当前问题"], request.Messages.Select(message => message.Content));
         Assert.All(request.Messages, message => Assert.Equal(ChatMessageRole.User, message.Role));
         var invocation = Assert.Single(invocations.Started);
         Assert.Equal(audit.ConsentId, invocation.MemoryOutbound?.ConsentId);
         Assert.Equal(memoryId, Assert.Single(invocation.MemoryOutbound!.Items).MemoryId);
         Assert.DoesNotContain(memoryId.ToString("D"), context, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("2", "82A414F8A3E829F957BA77614A993C908119D8C6A499C1B4717E2139DF656B67")]
+    [InlineData("3", "08A2DF50AAEBB677D727299C7C5B745DAF261BA06E9B2C66070125560F588013")]
+    [InlineData("4", "08A2DF50AAEBB677D727299C7C5B745DAF261BA06E9B2C66070125560F588013")]
+    public async Task MemoryConsentForPreviousPromptVersionOrHashFailsBeforeInvocationOrProvider(
+        string claimedVersion, string claimedHash)
+    {
+        var conversationId = Guid.NewGuid();
+        var history = new HistoryStore(conversationId);
+        history.Add(ConversationMessageRole.User, "当前问题");
+        var provider = new RecordingChatProvider("provider-a", "model-a", "https://provider-a.example/v1/chat");
+        var invocations = new RecordingInvocationStore();
+        var routed = new RoutedConversationProvider(
+            history,
+            new ModelRouter(new ChatProviderRegistry([provider]),
+                new MutableAiSettingsStore("provider-a", "model-a")),
+            await LoadRepositoryPromptsAsync(), invocations, TimeProvider.System);
+        var audit = MemoryAudit(provider, Guid.NewGuid()) with
+        {
+            PromptVersion = claimedVersion,
+            PromptContentHash = claimedHash
+        };
+        var result = await routed.SendAsync(new ConversationProviderRequest(
+            conversationId, Guid.NewGuid(), "当前问题", null, Guid.NewGuid(), Frozen(provider),
+            new MemoryOutboundEnvelope("{\"type\":\"USER_SELECTED_MEMORY_CONTEXT_V1\"}", audit)));
+
+        Assert.Equal(ConversationProviderOutcome.Failed, result.Outcome);
+        Assert.Equal(MemoryOutboundErrorCodes.ConsentStale, result.FailureCode);
+        Assert.Empty(provider.Requests);
+        Assert.Empty(invocations.Started);
     }
 
     [Theory]
@@ -556,8 +634,8 @@ public sealed class RoutedConversationProviderTests
             provider.Descriptor.Models[0].ModelId,
             MemoryOutboundContract.NormalizeHttpsOrigin(provider.Descriptor.DataDestination),
             "chat.general",
-            "2",
-            "82A414F8A3E829F957BA77614A993C908119D8C6A499C1B4717E2139DF656B67",
+            "4",
+            "8AB0FCC9572BA621CC38598CFEC62AFC448B0D2FC20F8EFEF29A6F9DA799C394",
             null,
             [new MemoryOutboundItemReference(memoryId, 1)],
             1,

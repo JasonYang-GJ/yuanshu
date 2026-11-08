@@ -440,8 +440,7 @@ public partial class MainWindow : Window
         if (lastTurn is not null && presentation.ShowResult)
         {
             AssistantResultStatusText.Text = presentation.StatusText;
-            AssistantResultText.Text = lastTurn.ResultSummary
-                                       ?? lastTurn.FailureMessage
+            AssistantResultText.Text = SessionUiPresenter.ResultText(lastTurn)
                                        ?? presentation.StatusText;
             AssistantResultBorder.Background = BrushFrom(lastTurn.Phase == "Failed" ? "#FCECED" : "#F7FAFB");
         }
@@ -1170,7 +1169,8 @@ public partial class MainWindow : Window
                     session.SessionId,
                     turn.Id,
                     granted: true,
-                    _lifetime.Token),
+                    _lifetime.Token,
+                    turn.WindowConsent?.ConsentId),
                 "WaitingForConfirmation" => await _api.ConfirmSessionTurnAsync(
                     session.SessionId,
                     turn.Id,
@@ -1237,7 +1237,8 @@ public partial class MainWindow : Window
                     session.SessionId,
                     turn.Id,
                     granted: false,
-                    _lifetime.Token)
+                    _lifetime.Token,
+                    turn.WindowConsent?.ConsentId)
                 : await _api.CancelSessionTurnAsync(
                     session.SessionId,
                     turn.Id,
@@ -1315,11 +1316,43 @@ public partial class MainWindow : Window
                 && !string.IsNullOrWhiteSpace(partial.Text))
             {
                 var echo = IsAssistantSpeechEcho(partial.Text);
+                if (!echo) _localVoiceReply.Clear();
+                if (!echo && VoiceReceptionGate.IsStopPhrase(partial.Text))
+                {
+                    // A complete Stop cannot be appended to an unfinished search or
+                    // deferred as a possible permission. Its final uses the existing
+                    // Host cancellation path, without creating a chat request.
+                    CancelPendingVoiceInput();
+                    VoiceTranscriptText.Text = partial.Text;
+                    VoiceStateText.Text = "正在停止上一条";
+                    PresentIslandPartial(partial.Text);
+                    return;
+                }
+                if (!echo && VisualSearchVoiceConsentGate.ShouldDeferPartial(partial.Text, _currentSession))
+                {
+                    // ASR may revise a permission prefix. Wait for the final text to
+                    // distinguish clarification from a replacement; explicit Stop wins.
+                    VoiceTranscriptText.Text = partial.Text;
+                    _islandVoiceText = partial.Text;
+                    _islandPhaseOverride = null;
+                    RenderAssistantSurface();
+                    return;
+                }
+                if (!echo && VoiceReceptionGate.IsCallPrefix(partial.Text))
+                {
+                    // Wait for the final: this may be only a call, or may grow into
+                    // an ordinary question/action which keeps the normal routing.
+                    VoiceTranscriptText.Text = partial.Text;
+                    PresentIslandPartial(partial.Text);
+                    return;
+                }
                 var preview = echo ? new VoiceSegmentPreview(partial.Text, false)
                     : _voiceSegments.ObservePartial(partial.Text, generation.Value, partial.RecognitionGeneration);
                 var text = preview.Text;
                 VoiceTranscriptText.Text = text;
-                if (SpeechEchoMatcher.CanInterrupt(partial.Text) && !echo && !preview.ContinuesPhrase)
+                if ((SpeechEchoMatcher.CanInterrupt(partial.Text)
+                    || VisualSearchVoiceConsentBinding.From(_currentSession) is not null
+                        && VisualSearchVoiceConsentGate.IsImmediateInterruption(partial.Text)) && !echo && !preview.ContinuesPhrase)
                 {
                     // A partial can still grow into a connected search clause. Keep only
                     // its short recognition prefix until the final disambiguates it.
@@ -1338,6 +1371,7 @@ public partial class MainWindow : Window
         Dispatcher.BeginInvoke(() =>
         {
             if (_voiceSession.ListeningGeneration != generation || IsAssistantSpeechEcho(utterance.Text)) return;
+            if (TryHandleVisualConsentUtterance(utterance, generation.Value)) return;
             switch (_voiceReception.Classify(utterance.Text, generation, utterance.RecognitionGeneration))
             {
                 case VoiceReceptionDecision.Submit:
@@ -1345,6 +1379,11 @@ public partial class MainWindow : Window
                         utterance.Text, generation.Value, utterance.RecognitionGeneration) });
                     break;
                 case VoiceReceptionDecision.Rest: _ = ChangeLocalReceptionAsync(standby: true); break;
+                case VoiceReceptionDecision.Stop: _ = CancelCurrentSessionTurnAsync(); break;
+                case VoiceReceptionDecision.Call:
+                    if (!IsAssistantSpeechEcho(VoiceReceptionGate.CanonicalWakePhrase(utterance.Text)!))
+                        _ = AcknowledgeCallAsync(utterance.Text);
+                    break;
                 case VoiceReceptionDecision.Wake:
                     // ASR may spell the same sound as 元书/袁叔. Check the canonical
                     // wake phrase too so that a spoken explanation cannot wake itself.
@@ -1373,6 +1412,7 @@ public partial class MainWindow : Window
 
         _lastVoiceUtterance = text;
         _lastVoiceUtteranceAt = now;
+        RevokeVisualVoiceConsent();
         InvalidateInputOperation();
         VoiceTranscriptText.Text = text;
         AssistantPlanBorder.Visibility = Visibility.Collapsed;
@@ -1525,6 +1565,7 @@ public partial class MainWindow : Window
     private void CancelPendingVoiceInput(bool invalidateOperation = true, bool preserveQueuedInput = false,
         bool preserveVoiceSegments = false)
     {
+        RevokeVisualVoiceConsent();
         if (!preserveVoiceSegments) _voiceSegments.Reset();
         if (invalidateOperation)
         {
@@ -1596,6 +1637,7 @@ public partial class MainWindow : Window
 
     private void InvalidateInputOperation()
     {
+        _localVoiceReply.Clear();
         _replacementInputVersion++;
         var previous = _replacementInputCancellation;
         _replacementInputCancellation = new CancellationTokenSource();
@@ -1733,13 +1775,18 @@ public partial class MainWindow : Window
             StatusBarText.Text = "上一条请求已取消。";
     }
 
-    private async Task SpeakAssistantAsync(string text, Guid? automaticRequest = null, bool localReceptionReply = false)
+    private Task SpeakAssistantAsync(string text, Guid? automaticRequest = null, bool localReceptionReply = false) =>
+        SpeakAssistantCoreAsync(text, automaticRequest, localReceptionReply, localCallReply: false);
+
+    private async Task SpeakAssistantCoreAsync(string text, Guid? automaticRequest, bool localReceptionReply,
+        bool localCallReply)
     {
         if (automaticRequest is { } request
             && !_voiceReplies.IsCurrent(request, _currentSession, _voiceSession.ListeningGeneration)) return;
         _speechCancellation?.Cancel();
         var speechCancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
         _speechCancellation = speechCancellation;
+        _localCallSpeech = localCallReply;
         _automaticSpeechRequest = automaticRequest;
         ReadAssistantResultButton.IsEnabled = false;
         _activeSpeechText = text;
@@ -1784,6 +1831,7 @@ public partial class MainWindow : Window
                 _lastAssistantSpeechText = text;
                 _lastAssistantSpeechEndedAt = DateTimeOffset.UtcNow;
                 _activeSpeechText = null;
+                _localCallSpeech = false;
                 _speechCancellation = null;
                 _automaticSpeechRequest = null;
                 ReadAssistantResultButton.IsEnabled = true;
@@ -2388,8 +2436,7 @@ public partial class MainWindow : Window
                 RenderSession(completed);
                 var turn = completed.Turns.Single(item => item.Id == submitted.TurnId);
                 var succeeded = turn.Phase == "Completed";
-                var message = turn.ResultSummary
-                              ?? turn.FailureMessage
+                var message = SessionUiPresenter.ResultText(turn)
                               ?? (succeeded ? "操作已完成。" : "这次操作没有成功。");
                 DesktopActionResultText.Text = message;
                 DesktopActionResultBorder.Background = BrushFrom(succeeded ? "#EAF6F0" : "#FCECED");

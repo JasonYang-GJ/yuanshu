@@ -13,6 +13,7 @@ public sealed class InstalledApplicationCatalogTests
     [InlineData("新星创作工具", "我的电脑桌面上的新星创作工具")]
     [InlineData("新星创作工具", "我电脑桌面上的新星创作工具")]
     [InlineData("新星创作工具", "桌面上新星创作工具")]
+    [InlineData("新星创作工具", "我见到桌面上的新星创作工具")]
     public void DesktopLocationQualifierResolvesTheRegisteredApplication(
         string registeredName, string spokenName)
     {
@@ -38,6 +39,102 @@ public sealed class InstalledApplicationCatalogTests
             var catalog = new InstalledApplicationCatalog(() => [literal, music]);
 
             Assert.Equal(literal.Target, catalog.ResolveByDisplayName("桌面上的网易云").LaunchTarget);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData("STEM")]
+    [InlineData("我桌面上的STEM")]
+    public void MisspelledNameCannotMatchInsideAnEnglishWord(string requested)
+    {
+        var root = CreateRoot("english-boundary");
+        try
+        {
+            var steam = Registration("Steam", root, "steam.exe");
+            var system = Registration("System Information", root, "msinfo32.exe");
+            var catalog = new InstalledApplicationCatalog(() => [steam, system]);
+            var error = Assert.Throws<InstalledApplicationResolutionException>(() => catalog.ResolveByDisplayName(requested));
+            Assert.Equal(InstalledApplicationErrorCodes.NotFound, error.Code);
+            Assert.Contains("Steam", error.Message);
+            Assert.DoesNotContain("System Information", error.Message);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData("Chrome", "Google Chrome")]
+    [InlineData("Code", "Visual Studio Code")]
+    [InlineData("Blender", "Blender 5.2")]
+    [InlineData("剪映", "剪映专业版")]
+    public void CompleteWordsAndChineseNamesRemainUsable(string requested, string registered)
+    {
+        var root = CreateRoot("complete-word");
+        try
+        {
+            var app = Registration(registered, root, "fixture.exe");
+            var catalog = new InstalledApplicationCatalog(() => [app]);
+            Assert.Equal(app.Target, catalog.ResolveByDisplayName(requested).LaunchTarget);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData("斯蒂姆")]
+    [InlineData("我见到桌面上的斯蒂姆")]
+    public void SteamSpokenNameUsesTheRegisteredTarget(string requested)
+    {
+        var root = CreateRoot("spoken-steam");
+        try
+        {
+            var app = Registration("Steam", root, "steam.exe");
+            var catalog = new InstalledApplicationCatalog(() => [app]);
+            Assert.Equal(app.Target, catalog.ResolveByDisplayName(requested).LaunchTarget);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void ExactRegisteredTypoNameWinsOverSimilaritySuggestions()
+    {
+        var root = CreateRoot("exact-before-suggestion");
+        try
+        {
+            var literal = Registration("STEM", root, "literal.exe");
+            var steam = Registration("Steam", root, "steam.exe");
+            var catalog = new InstalledApplicationCatalog(() => [literal, steam]);
+            Assert.Equal(literal.Target, catalog.ResolveByDisplayName("STEM").LaunchTarget);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void SpokenAliasDoesNotHideMultipleRegisteredTargets()
+    {
+        var root = CreateRoot("spoken-ambiguity");
+        try
+        {
+            var catalog = new InstalledApplicationCatalog(() =>
+                [Registration("Steam", root, "first.exe"), Registration("Steam", root, "second.exe")]);
+            var error = Assert.Throws<InstalledApplicationResolutionException>(() => catalog.ResolveByDisplayName("斯蒂姆"));
+            Assert.Equal(InstalledApplicationErrorCodes.Ambiguous, error.Code);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData("STEM", "System Information")]
+    [InlineData("Stea", "Steam")]
+    [InlineData("ox", "Firefox")]
+    public void IncompleteEnglishWordsNeverSelectAnApplication(string requested, string registered)
+    {
+        var root = CreateRoot("partial-english");
+        try
+        {
+            var app = Registration(registered, root, "fixture.exe");
+            var catalog = new InstalledApplicationCatalog(() => [app]);
+            var error = Assert.Throws<InstalledApplicationResolutionException>(() => catalog.ResolveByDisplayName(requested));
+            Assert.Equal(InstalledApplicationErrorCodes.NotFound, error.Code);
         }
         finally { Directory.Delete(root, recursive: true); }
     }

@@ -161,7 +161,8 @@ public sealed class WindowsDesktopSkillAdapter(
     IDesktopProcessLauncher launcher,
     IInstalledApplicationCatalog applications,
     IReliableDesktopAutomation automation,
-    IApplicationSearchWorkflowAutomation? applicationSearch = null) : ISkillAdapter
+    IApplicationSearchWorkflowAutomation? applicationSearch = null,
+    IVisualSearchAutomation? visualSearch = null) : ISkillAdapter
 {
     private readonly ConcurrentDictionary<Guid, RunState> _runs = new();
 
@@ -216,7 +217,7 @@ public sealed class WindowsDesktopSkillAdapter(
                 .ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             if (!result.ApplicationVerified || !result.QuerySubmitted || !result.ResultsVerified
-                || workflow.LatestMusicArtist is not null && result.LatestMusic is null
+                || !ApplicationSearchWorkflowEvidence.MatchesMusicIntent(workflow, result)
                 || workflow.FollowUp != ApplicationSearchFollowUp.None && (result.NoResults || !result.FollowUpInvoked || !result.FollowUpVerified)
                 || workflow.FollowUp == ApplicationSearchFollowUp.None && (result.FollowUpInvoked || result.FollowUpVerified))
                 throw new ApplicationSearchWorkflowException("application_search_incomplete", "搜索流程没有完成全部必要验证，不能标记为成功。");
@@ -224,7 +225,26 @@ public sealed class WindowsDesktopSkillAdapter(
             message = result.Summary;
             dataJson = JsonSerializer.Serialize(result);
         }
-        else (processId, message) = Execute(request.Capability, input, cancellationToken);
+        else
+        {
+            try { (processId, message) = Execute(request.Capability, input, cancellationToken); }
+            catch (DesktopSearchException exception) when (
+                exception.Code == DesktopSearchErrorCodes.CandidateNotFound
+                && request.Capability == WindowsDesktopCapabilities.SearchForeground
+                && visualSearch is not null && input.WindowIdentity is not null)
+            {
+                var visual = await visualSearch.SearchAsync(input.WindowIdentity,
+                        DesktopSearchQuery.NormalizeAndValidate(input.Target), cancellationToken)
+                    .ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!visual.ApplicationVerified || !visual.QuerySubmitted || !visual.ResultsVerified
+                    || visual.FollowUpInvoked || visual.FollowUpVerified || visual.SubmissionMode != "LiveFilter")
+                    throw new DesktopSearchException(DesktopSearchErrorCodes.WriteVerificationFailed,
+                        "视觉搜索未完成必要核对。");
+                (processId, message) = (null, visual.Summary);
+                dataJson = JsonSerializer.Serialize(visual);
+            }
+        }
         var run = new SkillRunReference(request.TaskId, request.InvocationId, null, request.AttemptId);
         _runs[request.InvocationId] = new RunState(
             run,

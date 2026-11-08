@@ -26,6 +26,10 @@ public sealed class CapabilityPolicyEngine
     private static readonly IReadOnlyDictionary<string, IReadOnlySet<string>> TrustedCapabilities =
         new Dictionary<string, IReadOnlySet<string>>(StringComparer.Ordinal)
         {
+            ["windows.desktop-task"] = new HashSet<string>(StringComparer.Ordinal)
+            {
+                "desktop.task.step"
+            },
             ["codex.project-task"] = new HashSet<string>(StringComparer.Ordinal)
             {
                 "coding.execute"
@@ -126,6 +130,8 @@ public sealed class CapabilityPolicyEngine
 
         return request.Capability switch
         {
+            "desktop.task.step" => scope.ScopeType == "DesktopTaskStep" && scope.ResourceId is null
+                && MatchesDesktopTaskScope(request.InputJson, scope.ScopeValue),
             "coding.execute" =>
                 string.Equals(scope.ScopeType, "Project", StringComparison.Ordinal)
                 && scope.ResourceId is not null,
@@ -156,6 +162,16 @@ public sealed class CapabilityPolicyEngine
                 && scope.ResourceId is null,
             _ => false
         };
+    }
+
+    private static bool MatchesDesktopTaskScope(string json, string scope)
+    {
+        try
+        {
+            var value = JsonSerializer.Deserialize<DesktopTaskStepAuthorization>(json);
+            return value is not null && value.ToScopeValue() == scope;
+        }
+        catch (Exception e) when (e is JsonException or ArgumentException or NotSupportedException) { return false; }
     }
 
     private static bool MatchesApplicationSearchScope(string inputJson, string scopeValue)

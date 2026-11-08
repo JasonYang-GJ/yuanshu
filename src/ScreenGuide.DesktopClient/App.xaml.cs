@@ -21,7 +21,8 @@ public partial class App : System.Windows.Application
             if (_singleInstance is null)
             {
                 if (!launch.Background)
-                    await DesktopClientSingleInstance.TrySignalExistingAsync(showManagement: !launch.ShowAssistant);
+                    await DesktopClientSingleInstance.TrySignalExistingAsync(
+                        showManagement: !launch.ShowAssistant, startListening: launch.StartListening);
                 Shutdown();
                 return;
             }
@@ -66,11 +67,8 @@ public partial class App : System.Windows.Application
             if (launch.UseIsland)
                 window.ConfigureIslandSurface(BuiltInIsland.ResolveExecutable(AppContext.BaseDirectory,
                     Environment.GetEnvironmentVariable("SCREEN_GUIDE_ISLAND_PATH")));
-            _singleInstance.SetActivationHandler(showManagement => Dispatcher.Invoke(() =>
-            {
-                if (showManagement) window.OpenDashboardFromTray();
-                else window.ShowAssistantSurface();
-            }));
+            _singleInstance.SetActivationRequestHandler(request => Dispatcher.BeginInvoke(
+                new Action(async () => await window.ActivateFromLaunchAsync(request))));
             _tray.OpenRequested += window.ShowAssistantSurface;
             _tray.ManagementRequested += window.OpenDashboardFromTray;
             _tray.IslandSettingsRequested += async () => await window.OpenIslandSettingsFromTrayAsync();

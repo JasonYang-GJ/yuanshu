@@ -6,11 +6,30 @@ public partial class MainWindow
 {
     private readonly VoiceReceptionGate _voiceReception = new();
     private readonly VoiceCommandSegments _voiceSegments = new();
+    private readonly LocalVoiceReplyPresentation _localVoiceReply = new();
+    private bool _localCallSpeech;
     private CancellationTokenSource? _receptionCancellation;
     private string _receptionTransitionText = "正在切换语音接收…";
 
     private void SynchronizeVoiceReception() => _voiceReception.SynchronizeMicrophone(
         _voiceSession.ListeningGeneration, _voice.RecognitionGeneration);
+
+    private string? GetLocalVoiceReply(bool blocked) => _localVoiceReply.Get(_currentSession,
+        _voiceSession.ListeningGeneration, _replacementInputVersion, blocked);
+
+    private async Task AcknowledgeCallAsync(string text)
+    {
+        if (!_voiceSession.IsListening) return;
+        // Calling the assistant is local feedback, not a replacement instruction.
+        // Preserve the current Turn, pending operation and exact window consent.
+        _voiceSegments.Reset();
+        CancelVoiceFeedback();
+        _islandPhaseOverride = null;
+        _islandVoiceText = text;
+        VoiceTranscriptText.Text = text;
+        _localVoiceReply.Show("我在。", _currentSession, _voiceSession.ListeningGeneration, _replacementInputVersion);
+        await SpeakAssistantCoreAsync("我在。", automaticRequest: null, localReceptionReply: false, localCallReply: true);
+    }
 
     private void CancelReceptionTransition()
     {

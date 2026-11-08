@@ -336,6 +336,41 @@ public sealed class R4QwenRealAcceptanceRunnerTests
                     .Select(item => item.Status)
                     .ToArray());
 
+            var prompts = host.Services.GetRequiredService<PromptRegistry>();
+            var expectedPrompt = prompts.GetRequired("chat.general", "4", "qwen");
+            var historicalPrompt = prompts.GetRequired("chat.general", "1", "qwen");
+            foreach (var invocation in invocations.Where(item => item.Purpose == AiInvocationPurpose.Conversation))
+            {
+                Assert.Equal("chat.general", invocation.PromptId);
+                Assert.Equal("4", invocation.PromptVersion);
+                Assert.Equal(expectedPrompt.ContentSha256, invocation.PromptContentHash);
+                var turn = snapshot.Turns.Single(item => item.Id == invocation.SessionTurnId);
+                var succeeded = invocation.Status == AiInvocationStatus.Succeeded;
+                var invalidPromptRecords = new[]
+                {
+                    invocation with { PromptId = "intent.semantic" },
+                    invocation with { PromptVersion = "1" },
+                    invocation with { PromptVersion = "2" },
+                    invocation with { PromptVersion = "3" },
+                    invocation with
+                    {
+                        PromptVersion = "1",
+                        PromptContentHash = historicalPrompt.ContentSha256
+                    },
+                    invocation with { PromptContentHash = historicalPrompt.ContentSha256 },
+                    invocation with { PromptContentHash = new string('0', 64) }
+                };
+                foreach (var invalid in invalidPromptRecords)
+                {
+                    var exception = Assert.Throws<R4ValidationFailureException>(() =>
+                        R4QwenRunnerExecution.RequireConversationInvocation(
+                            [invalid], provider, turn, expectedPrompt, invocation.Status,
+                            requireUsage: succeeded,
+                            requireProviderRequestId: succeeded));
+                    Assert.Equal("r4_invocation_mismatch", exception.ErrorCode);
+                }
+            }
+
             await host.StopAsync(timeout.Token);
             stopped = true;
             Assert.All(

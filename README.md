@@ -2,21 +2,25 @@
 
 # 元枢 Yuanshu
 
-**Windows 本机 AI 学习与操作助手：用中文交流，理解你授权查看的窗口，完成少量明确、可控的电脑操作。**
+**Windows 本机 AI 学习与操作助手：用中文交流，理解你授权查看的窗口，执行可核对的多步软件任务。**
 
 A Windows desktop AI assistant for Chinese conversation, local window understanding, and explicitly authorized desktop actions.
 
-元枢把文字/语音聊天、单窗口文字识别、应用与网站启动、受控搜索和授权项目中的编程任务放在一个桌面入口。适合探索“AI 怎样安全地协助日常电脑使用”的开发者和使用者。
+元枢把文字/语音聊天、单窗口理解、应用与网站启动、受控搜索、多步软件操作和授权项目中的编程任务放在一个桌面入口。没有可靠控件接口的软件也可尝试经确认的识图点击；具体能力与实测范围见下文。
 
-本仓库以元枢为主产品，灵动岛源码已纳入 `src/Yuanshu.Island`，作为内置功能统一构建、安装和更新。仓库远程地址仍沿用此前的 `yuansu`，历史名称不影响安装身份。
+本仓库以元枢为主产品，灵动岛源码已纳入 `src/Yuanshu.Island`，作为内置功能统一构建、安装和更新。2026-11-08 仓库名称由拼写错误的 `yuansu` 更正为 `yuanshu`；这是仓库改名，不改变产品安装身份。
 
-**元枢与超级灵动岛现统一在本仓库维护。** 灵动岛的当前代码见 [内置组件](src/Yuanshu.Island)，完整产品见 [统一构建指南](docs/UNIFIED_PRODUCT_BUILD.md)。原 `yuanshu-island` 私有仓库已归档为只读，保留历史与迁移说明；后续开发和问题反馈统一到这里，无需再克隆或安装两个项目。详见 [仓库合并说明](docs/GITHUB_REPOSITORY_MERGE.md)。
+**元枢与超级灵动岛现统一在本仓库维护。** 灵动岛的当前代码见 [内置组件](src/Yuanshu.Island)，完整产品见 [统一构建指南](docs/UNIFIED_PRODUCT_BUILD.md)。旧独立仓库不再作为开发入口；后续开发和问题反馈统一到这里，无需再克隆或安装两个项目。历史保留与旧仓库处理状态见 [仓库合并说明](docs/GITHUB_REPOSITORY_MERGE.md)。
 
 **当前状态：V0.8.0 内置灵动岛合并候选。最近冻结版仍为 V0.6.0；历史真实指针问答及正式分发门禁不会因本次合并自动通过。源码公开不等于正式签名版发布。**
 
 本机完整合并、统一安装升级与真实入口验收已完成，见 [0.8.0 合并验收](docs/UNIFIED_PRODUCT_ACCEPTANCE.md)。
 
 后续 R10 已修复语音及记事本入口问题并更新本机，真实千问连续问答、停止、记事本操作、真人问答播报及“你好元枢”待命唤醒通过，见 [真人与真实模型验收](docs/UNIFIED_PRODUCT_REAL_USAGE.md)。
+
+2026-10-22 本机候选进一步修复主动打开即语音，以及“打开桌面上的软件”误走文档流程。自动麦克风、三个软件的真实文字打开及真人口述原句打开通过；具体结果和任意软件内操作的边界见 [本次修复与验收](docs/STARTUP_VOICE_AND_DESKTOP_APPLICATION_FIX.md)。
+
+2026-11-05 本机候选已接入通用多步软件操作与单窗口识图点击。普通控件路径有 Excel、计算器、Word 等分层实测；视觉路径已在无标准子控件、目标位置变化的合成窗口中完成真实模型与鼠标点击验证。视觉步骤逐次确认，真人语音触发与第三方软件的视觉任务仍未完成验收，不能视为任意软件全自动兼容。详见 [通用任务](docs/GENERAL_DESKTOP_TASKS.md) 与 [视觉任务](docs/VISUAL_DESKTOP_TASKS.md)。
 
 [功能与限制](#能做什么) · [开发指南](docs/DEVELOPMENT.md) · [产品事实](PRODUCT.md) · [技术架构](ARCHITECTURE.md) · [路线图](ROADMAP.md) · [公开范围与权利说明](docs/PUBLIC_SOURCE_STATUS.md)
 
@@ -29,13 +33,15 @@ A Windows desktop AI assistant for Chinese conversation, local window understand
 | 打开应用和网站 | 打开唯一识别的已安装应用、校验后的 HTTPS 网站 | 已实现；一次明确指令只授权一次动作 |
 | 受控搜索 | 在可靠识别的搜索框或地址搜索栏填写并提交查询 | 已实现；无法唯一识别控件时拒绝执行 |
 | 单窗口理解 | 读取当前授权窗口的文字和可访问控件，提供中文帮助 | 已实现；本机 OCR，不把窗口图片上传给模型 |
+| 通用软件任务 | 在指定窗口内连续填写、选择、调用按钮并核对结果 | 已实现；普通步骤受任务范围约束，敏感或不确定写入另行确认 |
+| 看图操作 | 通过当前窗口图片定位目标并执行有限操作 | 已实现；图片发送需独立许可，冻结视觉模型，每步显示目标框并确认；真实验证目前覆盖合成窗口点击 |
 | 编程任务 | 在授权的 Git 项目中调用本机 Codex，记录修改与测试结果 | 已实现；需本机 Codex，保留项目和文件权限边界 |
 | 可控本机记忆 | 手动管理事实、偏好、项目备注和决定 | 已实现；加密保存，选择并预览确认后才用于一次聊天 |
 | 内置灵动岛 | 语音与任务状态、媒体和音量提示、位置设置 | 与元枢统一入口、托盘、安装和退出；保留原岛设置 |
 | 停止与恢复 | 取消后台工作，拒绝迟到结果；重启后保留会话状态 | 已实现；不自动重放未完成的危险操作 |
 | 指针区域提问 | 指向文字 → 本机识别 → 完整预览 → 再确认发送纯文本 | 修复候选已实现，真实 OCR/模型闭环仍待验收 |
 
-例如，你可以尝试“打开记事本”“继续解释刚才的问题”；查看窗口、打开文件或执行编程任务时，软件会要求对应的可见确认。具体可操作范围取决于应用是否提供可可靠识别的控件。
+例如，你可以尝试“打开记事本”“继续解释刚才的问题”，或将目标软件放到前台后说“在当前窗口看图点击某个按钮”；查看窗口、打开文件或执行编程任务时，软件会要求对应的可见确认。实际可操作范围取决于控件可靠性、画面稳定性和对应授权。
 
 普通聊天与编程任务分别配置：切换聊天模型不会替你切换编程代理，也不会扩大文件或电脑操作权限。普通聊天的 Codex 适配器当前有意停用，编程功能仍使用独立 Codex 连接器。
 
@@ -43,7 +49,8 @@ A Windows desktop AI assistant for Chinese conversation, local window understand
 
 - 只查看本次明确授权的单个窗口，不进行全桌面截图；窗口图像和音频不作为运行日志保存。
 - 云端普通聊天会发送相应文字；记忆和指针识别文字有单独的出站预览与确认。API 调用费用由使用者自己的服务账号承担。
-- 普通启动、开机启动及更新后启动保持语音暂停；点击可见的“开始语音”后才进入监听。旧显式 `--assistant` 语音入口保留兼容。关闭到托盘可能继续已开启的待命；需要停止时使用停止功能或真正退出程序。
+- 视觉桌面任务在本次明确许可后，把绑定窗口的临时图片发送给当前支持视觉的模型；确认中展示模型和目的地，不静默改换路由。图片不持久化。
+- 主动打开元枢会在可见助手就绪后开始语音；已有暂停实例再次被主动打开也会开始语音。后台、自启、管理、设置和安装结束入口不开麦，`--paused` 可明确暂停启动。关闭到托盘可能继续已开启的待命；需要停止时使用停止功能或真正退出程序。本次启动修复的交付与验证状态见 [修复记录](docs/STARTUP_VOICE_AND_DESKTOP_APPLICATION_FIX.md)。
 - API 密钥通过 Windows 当前用户加密保护，不放进源码、普通设置或数据库正文。
 - 不提供任意鼠标移动、任意点击、密码输入、支付、删除、账号安全设置修改或无人监督的远程控制。
 - 手机端、云同步、实时视频理解和复杂多代理产品能力仍不属于当前已实现范围。
@@ -52,8 +59,8 @@ A Windows desktop AI assistant for Chinese conversation, local window understand
 
 需要 Windows x64、Git，以及符合 [global.json](global.json) 的 .NET SDK（当前锁定 10.0.400，允许同功能带补丁更新）。窗口、语音和桌面界面验收需要可交互的 Windows 会话。
 
-    git clone https://github.com/JasonYang-GJ/yuansu.git yuansu
-    cd yuansu
+    git clone https://github.com/JasonYang-GJ/yuanshu.git yuanshu
+    cd yuanshu
     dotnet restore ScreenGuide.slnx --locked-mode --disable-parallel
     dotnet build ScreenGuide.slnx -c Release --no-restore --maxcpucount:1
 
@@ -70,6 +77,8 @@ A Windows desktop AI assistant for Chinese conversation, local window understand
 主要技术：**C# / .NET 10、WPF、Rust / Tauri、React、Windows UI Automation、Windows Graphics Capture、SQLite、DPAPI、Sherpa-ONNX**。主界面、后台与内置岛采用分开的进程；一个产品管理它们的安装和生命周期，权限执行仍在 Host。
 
 ## 验证状态
+
+2026-11-05 视觉候选的现有完整构建记录为 **3,871 项 C#、167 项前端、71 项 Rust 测试通过**，另有 Clippy 与 26 项安装合同检查通过；同包隔离安装、本机数据保留升级与安装版识图点击验证通过。2026-11-08 的 GitHub 更新仅同步这些已实现源码与对应证据，不将历史测试描述为本次新跑，不发布新的安装包。已验证与未覆盖范围见 [视觉任务验收](docs/VISUAL_DESKTOP_TASKS.md)。
 
 2026-10-19 的 0.8.0 R10 合并候选完整构建记录：**2,260 项 C#、154 项前端、67 项 Rust 测试通过**，另有严格 Clippy 与 23 项安装合同检查通过。2026-10-20 上传准备逐项复核了该构建的 598 个源文件，内容与验收清单完全一致；这些数字来自已有原始报告，不是本次 GitHub 上传新跑出的 CI 结果。见 [合并验收](docs/UNIFIED_PRODUCT_ACCEPTANCE.md) 和 [真人与真实模型验收](docs/UNIFIED_PRODUCT_REAL_USAGE.md)。
 

@@ -8,6 +8,9 @@ public static class SpeechEchoMatcher
     [
         "停",
         "停一下",
+        "停停",
+        "停停停",
+        "停止",
         "等一下",
         "不对",
         "不是",
@@ -31,6 +34,13 @@ public static class SpeechEchoMatcher
         if (recognized.Length < 2 || assistant.Length < 2)
         {
             return false;
+        }
+
+        // A short acknowledgement is also a common prefix of a new user
+        // sentence. Only its complete repetition is reliable echo evidence.
+        if (assistant.Length < 4)
+        {
+            return string.Equals(recognized, assistant, StringComparison.Ordinal);
         }
 
         if (assistant.Contains(recognized, StringComparison.Ordinal)

@@ -270,6 +270,10 @@ public partial class MainWindow
             or "WaitingForWindowConsent" or "WaitingForConfirmation" or "WaitingForUser"
             or "WaitingForMemoryOutboundConsent" or "WaitingForPointerAnswerConsent";
         var active = ui.ShowStop || _voiceCommandBusy;
+        var localReply = GetLocalVoiceReply(active || waiting || turn?.Phase is "Failed" or "Interrupted"
+            || _voiceReception.Mode == VoiceReceptionMode.Standby
+            || voice.State is VoiceSessionState.Faulted or VoiceSessionState.CleanupFailed
+            || ErrorBanner.Visibility == Visibility.Visible);
         var phase = _voiceSession.IsListening ? "listening" : "paused";
         var status = _voiceSession.IsListening ? "正在聆听" : "语音已暂停";
         var detail = _voiceSession.IsListening ? "直接说出你想做的事。" : "点击开始语音，或到管理窗口打字。";
@@ -286,6 +290,12 @@ public partial class MainWindow
             detail = ui.DetailText ?? detail;
             status = ui.StatusText;
         }
+        if (localReply is not null)
+        {
+            phase = "listening";
+            status = "正在聆听";
+            detail = localReply;
+        }
         if (active)
         {
             phase = "working";
@@ -293,8 +303,15 @@ public partial class MainWindow
             detail = turn is { Phase: "Executing", IntentKind: "ApplicationSearch" }
                 ? ui.DetailText ?? "正在执行你的请求。" : "正在执行你的请求。";
         }
-        if (waiting) { phase = "waiting"; status = "需要你确认"; detail = ui.StatusText + "。打开管理窗口继续确认。"; }
-        if (speaking) { phase = "speaking"; status = "正在回答"; detail = _activeSpeechText ?? detail; }
+        if (waiting)
+        {
+            phase = "waiting";
+            status = "需要你确认";
+            detail = (string.IsNullOrWhiteSpace(ui.DetailText) ? ui.StatusText : ui.DetailText)
+                + "\n打开管理窗口继续处理。";
+        }
+        if (speaking && (!_localCallSpeech || !active && !waiting))
+        { phase = "speaking"; status = "正在回答"; detail = _activeSpeechText ?? detail; }
         if (_islandPhaseOverride is { } reception && _voiceSession.IsListening)
         {
             phase = reception;
@@ -307,8 +324,34 @@ public partial class MainWindow
         { phase = "error"; status = "需要检查"; detail = ErrorMessageText.Text; }
         if (voice.State is VoiceSessionState.Faulted or VoiceSessionState.CleanupFailed)
         { phase = "error"; status = "语音需要检查"; detail = voice.Message; }
+        if (_islandRequested)
+        {
+            _visualConsentRenderedBinding = GetDisplayableVisualConsent();
+            if (_visualConsentRenderedBinding is { } consent)
+            {
+                phase = "waiting";
+                if (_visualConsentUnavailable == consent)
+                {
+                    status = "需要手动确认";
+                    detail = VisualSearchVoiceConsentGate.ManualConfirmationPrompt;
+                    _visualConsentRenderedBinding = null;
+                }
+                else
+                {
+                    status = consent.Purpose switch
+                    {
+                        "TaskObservation" => "需要本次软件任务许可",
+                        "TaskAction" => "需要确认当前这一步",
+                        "ResultRead" => "需要只读结果许可",
+                        _ => "需要这次视觉搜索许可"
+                    };
+                    detail = (string.IsNullOrWhiteSpace(ui.DetailText) ? ui.StatusText : ui.DetailText)
+                        + "\n" + VisualConsentPrompt(consent);
+                }
+            }
+        }
         if (_forceClose) { phase = "stopping"; status = "正在退出"; detail = "正在关闭麦克风和本机服务…"; }
-        var identity = $"{_voiceSession.ListeningGeneration}|{voice.CanStart}|{voice.CanStop}|{_currentSession?.CoordinatorInstanceId}|{_currentSession?.SessionId}|{turn?.Id}|{_replacementInputVersion}";
+        var identity = $"{_voiceSession.ListeningGeneration}|{voice.CanStart}|{voice.CanStop}|{_currentSession?.CoordinatorInstanceId}|{_currentSession?.SessionId}|{turn?.Id}|{turn?.WindowConsent?.ConsentId}|{_replacementInputVersion}";
         if (_islandControlIdentity != identity)
         {
             _islandControlIdentity = identity;

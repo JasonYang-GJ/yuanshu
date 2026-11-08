@@ -22,8 +22,86 @@ public sealed class QwenChatModelProviderTests
         var model = Assert.Single(provider.Descriptor.Models);
         Assert.Equal("qwen3.7-plus", model.ModelId);
         Assert.Equal(
-            ChatModelCapabilities.Streaming | ChatModelCapabilities.JsonObjectOutput,
+            ChatModelCapabilities.Streaming | ChatModelCapabilities.JsonObjectOutput | ChatModelCapabilities.Vision,
             model.Capabilities);
+    }
+
+    [Fact]
+    public async Task ImageCompletionSendsOneBoundedPngWithTextAndKeepsTheExactModelDestination()
+    {
+        const string png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGP4/x8AAwAB//wl3FEAAAAASUVORK5CYII=";
+        using var image = new ChatImage(Convert.FromBase64String(png));
+        var credentials = new TestCredentialStore("synthetic-key");
+        string? bodyText = null;
+        var handler = new StubHttpMessageHandler(async (request, token) =>
+        {
+            Assert.Equal("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", request.RequestUri!.AbsoluteUri);
+            bodyText = await request.Content!.ReadAsStringAsync(token);
+            return SseResponse("data: {\"choices\":[{\"delta\":{\"content\":\"seen\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n");
+        });
+        await using var provider = new QwenChatModelProvider(credentials, handler);
+        var response = await provider.CompleteAsync(Request() with
+        { Messages = [new(ChatMessageRole.Assistant, "earlier text"), new(ChatMessageRole.User, "identify synthetic target", Images: [image])] });
+        Assert.Equal("seen", response.Text);
+        using var body = JsonDocument.Parse(bodyText!);
+        Assert.Equal(QwenChatModelProvider.DefaultModelId, body.RootElement.GetProperty("model").GetString());
+        var messages = body.RootElement.GetProperty("messages");
+        Assert.Equal("earlier text", messages[0].GetProperty("content").GetString());
+        var content = messages[1].GetProperty("content");
+        Assert.Equal(2, content.GetArrayLength());
+        Assert.Equal("text", content[0].GetProperty("type").GetString());
+        Assert.Equal("identify synthetic target", content[0].GetProperty("text").GetString());
+        Assert.Equal("image_url", content[1].GetProperty("type").GetString());
+        Assert.Equal("data:image/png;base64," + png, content[1].GetProperty("image_url").GetProperty("url").GetString());
+        Assert.Equal(1, handler.SendCount);
+        Assert.Equal(1, credentials.OpenLeaseCount);
+        Assert.False(image.IsDisposed);
+        Assert.DoesNotContain(png, response.ToString(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("assistant")]
+    [InlineData("two")]
+    [InlineData("null")]
+    [InlineData("disposed")]
+    public async Task InvalidImagesFailBeforeCredentialOrHttp(string invalid)
+    {
+        using var image = new ChatImage(Convert.FromBase64String(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGP4/x8AAwAB//wl3FEAAAAASUVORK5CYII="));
+        if (invalid == "disposed") image.Dispose();
+        var credentials = new TestCredentialStore("synthetic-key");
+        var handler = new StubHttpMessageHandler((_, _) => throw new InvalidOperationException("Must not send."));
+        await using var provider = new QwenChatModelProvider(credentials, handler);
+        var error = await Assert.ThrowsAsync<ChatModelException>(() => provider.CompleteAsync(Request() with
+        { Messages = [new(invalid == "assistant" ? ChatMessageRole.Assistant : ChatMessageRole.User, "synthetic",
+            Images: invalid == "two" ? [image, image] : invalid == "null" ? [null!] : [image])] }));
+        Assert.Equal("chat.image_input_invalid", error.Error.Code);
+        Assert.Equal(0, credentials.OpenLeaseCount);
+        Assert.Equal(0, handler.SendCount);
+    }
+
+    [Fact]
+    public async Task CancelImageRequestStopsItsHttpCallWithoutFallbackOrDisposingTheCallersImage()
+    {
+        using var image = new ChatImage(Convert.FromBase64String(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGP4/x8AAwAB//wl3FEAAAAASUVORK5CYII="));
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handler = new StubHttpMessageHandler(async (_, token) =>
+        {
+            started.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            throw new InvalidOperationException("Cancelled call must not finish.");
+        });
+        await using var provider = new QwenChatModelProvider(new TestCredentialStore("synthetic-key"), handler);
+        var turn = Guid.NewGuid();
+        var pending = provider.CompleteAsync(Request(turnId: turn) with
+        { Messages = [new(ChatMessageRole.User, "synthetic", Images: [image])] });
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await provider.CancelAsync(turn);
+        var error = await Assert.ThrowsAsync<ChatModelException>(() => pending);
+        Assert.Equal(ChatModelErrorKind.Cancelled, error.Error.Kind);
+        Assert.Equal(1, handler.SendCount);
+        Assert.False(image.IsDisposed);
     }
 
     [Fact]

@@ -14,7 +14,8 @@ public enum UniversalIntentKind
     CodingTask,
     Unsupported,
     ApplicationSearch,
-    FindDesktopFile
+    FindDesktopFile,
+    DesktopTask
 }
 
 public enum IntentPlanReadiness
@@ -128,6 +129,17 @@ public sealed partial class DeterministicIntentPlanner(TimeProvider timeProvider
         };
         if (explicitPlan is not null) return explicitPlan;
 
+        if (!context.PreferInstalledApplication && context.ExplicitUserIntent is null or UniversalIntentKind.DesktopTask
+            && DesktopTaskRequest.TryParse(normalized, out var desktopTask))
+        {
+            if (desktopTask!.UsesCurrentWindow && context.ForegroundApplication is null)
+                return NeedsContext(normalized, UniversalIntentKind.DesktopTask,
+                    "请切换到要操作的软件，再继续这次任务。", "前台应用");
+            return Ready(normalized, UniversalIntentKind.DesktopTask,
+                "准备在你指定的软件中分步完成任务；读取窗口内容前会显示本次授权。",
+                desktopTask.ApplicationName, "desktop.task.step", false);
+        }
+
         // Only the Host can set this after resolving a complete installed application name.
         // A registered name such as “微信搜索助手” must win over splitting on 搜索.
         if (context.PreferInstalledApplication && TryParseApplication(normalized, out var completeApplicationName))
@@ -158,16 +170,47 @@ public sealed partial class DeterministicIntentPlanner(TimeProvider timeProvider
             var followUpText = applicationSearch.FollowUp switch
             {
                 "OpenFirst" => "，并打开第一条可确认的媒体结果",
+                "PlayFirst" when applicationSearch.MusicChart == "NetEaseHotChart" => "，并播放同一首已核实的榜首歌曲",
                 "PlayFirst" => "，并播放第一首可确认的媒体结果",
                 _ => string.Empty
             };
-            var applicationSearchText = applicationSearch.LatestMusicArtist is { } artist
-                ? $"按发行时间查找“{artist}”最新发布的歌曲，并搜索有日期依据的结果"
-                : $"搜索“{applicationSearch.Query}”";
+            var applicationSearchText = applicationSearch.MusicChart == "NetEaseHotChart"
+                ? "按当前网易云热歌榜选择榜首歌曲，并搜索已核实的具体曲目"
+                : applicationSearch.LatestMusicArtist is { } artist
+                    ? $"按发行时间查找“{artist}”最新发布的歌曲，并搜索有日期依据的结果"
+                    : $"搜索“{applicationSearch.Query}”";
             var summary = $"打开“{applicationSearch.ApplicationName}”并{applicationSearchText}{followUpText}";
             return Ready(normalized, UniversalIntentKind.ApplicationSearch, summary,
                 applicationSearch.ApplicationName, "desktop.application.search", true,
                 $"确认{summary}。") with { ApplicationSearch = applicationSearch };
+        }
+
+        // Parse the search envelope before inspecting its query for words such as
+        // 修改代码 or 打开文件. Quoted search text never grants a second action.
+        var namedSearch = SearchRegex().IsMatch(normalized)
+            ? Match.Empty : ApplicationSearchRequest.MatchNamedSearch(normalized);
+        var requestedApplication = namedSearch.Success ? namedSearch.Groups["app"].Value.Trim() : null;
+        var searchText = namedSearch.Success ? "搜索" + namedSearch.Groups["query"].Value : normalized;
+        if (TryParseForegroundSearch(searchText, out var query))
+        {
+            if (context.ForegroundApplication is null
+                || requestedApplication is not null && !MatchesForegroundApplication(requestedApplication, context.ForegroundApplication))
+            {
+                return NeedsContext(normalized, UniversalIntentKind.SearchForeground,
+                    requestedApplication is null ? "没有识别到你刚才使用的软件，请先切回目标软件。"
+                        : $"请先切到“{requestedApplication}”的窗口，再继续这次搜索；不会在其他软件里输入。", "前台应用");
+            }
+
+            return Ready(normalized, UniversalIntentKind.SearchForeground,
+                $"在“{context.ForegroundApplication.WindowTitle}”的可靠搜索框中搜索“{query}”",
+                query, "desktop.search.submit", true,
+                $"确认只在“{context.ForegroundApplication.WindowTitle}”中可靠识别的搜索框输入并提交“{query}”。");
+        }
+
+        if (LooksLikeForegroundSearch(normalized) || namedSearch.Success)
+        {
+            return Unsupported(normalized,
+                "请提供 1 到 200 个字符的搜索内容，不要包含控制字符或附加操作；需要按原文搜索时请使用完整引号。");
         }
 
         if (IsCodingRequest(normalized))
@@ -197,32 +240,6 @@ public sealed partial class DeterministicIntentPlanner(TimeProvider timeProvider
                 $"用默认浏览器打开{websiteName}，并把浏览器窗口显示在前台",
                 website, "browser.open", true,
                 $"确认用默认浏览器打开 {websiteName}，并将窗口显示在前台。");
-        }
-
-        var namedSearch = SearchRegex().IsMatch(normalized) ? Match.Empty : NamedSearchRegex().Match(normalized);
-        var requestedApplication = namedSearch.Success ? namedSearch.Groups["app"].Value.Trim() : null;
-        var searchText = namedSearch.Success ? "搜索" + namedSearch.Groups["query"].Value : normalized;
-        if (TryParseForegroundSearch(searchText, out var query))
-        {
-            if (context.ForegroundApplication is null
-                || requestedApplication is not null && !MatchesForegroundApplication(requestedApplication, context.ForegroundApplication))
-            {
-                return NeedsContext(normalized, UniversalIntentKind.SearchForeground,
-                    requestedApplication is null ? "没有识别到你刚才使用的软件，请先切回目标软件。"
-                        : $"请先切到“{requestedApplication}”的窗口，再继续这次搜索；不会在其他软件里输入。", "前台应用");
-            }
-
-            return Ready(normalized, UniversalIntentKind.SearchForeground,
-                $"在“{context.ForegroundApplication.WindowTitle}”的可靠搜索框中搜索“{query}”",
-                query, "desktop.search.submit", true,
-                $"确认只在“{context.ForegroundApplication.WindowTitle}”中可靠识别的搜索框输入并提交“{query}”。");
-        }
-
-        if (LooksLikeForegroundSearch(normalized) || namedSearch.Success)
-        {
-            return Unsupported(
-                normalized,
-                "搜索内容必须为 1 到 200 个字符，且不能包含控制字符。");
         }
 
         if (IsDescribeForegroundRequest(normalized))
@@ -483,10 +500,8 @@ public sealed partial class DeterministicIntentPlanner(TimeProvider timeProvider
             return false;
         }
 
-        query = match.Groups[1].Value
-            .Trim(' ', '。', '！', '!', '？', '?', '"')
-            .Normalize(NormalizationForm.FormKC);
-        return query.Length is > 0 and <= 200;
+        return ApplicationSearchRequest.TryParseQuery(match.Groups["query"].Value,
+            allowFollowUp: false, out query, out _, out _);
     }
 
     private static bool ContainsDisallowedControl(string text) =>
@@ -496,7 +511,7 @@ public sealed partial class DeterministicIntentPlanner(TimeProvider timeProvider
         new(text.Where(character => !char.IsControl(character)).ToArray());
 
     private static bool LooksLikeForegroundSearch(string text) =>
-        SearchCommandPrefixRegex().IsMatch(text) || NamedSearchRegex().IsMatch(text);
+        SearchRegex().IsMatch(text) || ApplicationSearchRequest.MatchNamedSearch(text).Success;
 
     private static bool MatchesForegroundApplication(string requested, ForegroundApplicationContext foreground)
     {
@@ -506,9 +521,6 @@ public sealed partial class DeterministicIntentPlanner(TimeProvider timeProvider
             || string.Equals(requested, foreground.WindowTitle, StringComparison.OrdinalIgnoreCase)
             || (foreground.ApplicationNames?.Any(name => string.Equals(name, requested, StringComparison.OrdinalIgnoreCase)) ?? false);
     }
-
-    [GeneratedRegex(@"^(?:请帮我|帮我|请|给我)?在(?<app>[^\r\n]{0,80}?)(?:里面|里|中|内)(?:请帮我|帮我|给我)?(?:搜索|查找|搜一下|搜)(?:一下)?\s*(?<query>.*)$", RegexOptions.CultureInvariant)]
-    private static partial Regex NamedSearchRegex();
 
     private static bool IsCompoundOpenAndSearch(string text) =>
         (text.Contains("打开", StringComparison.Ordinal)
@@ -541,11 +553,12 @@ public sealed partial class DeterministicIntentPlanner(TimeProvider timeProvider
         RegexOptions.CultureInvariant)]
     private static partial Regex CommandArgumentRegex();
 
-    [GeneratedRegex(@"^(?:请|帮我|请帮我|给我)?(?:在(?:(?:当前|这个|刚才的)?(?:窗口|软件|页面|浏览器)(?:的)?(?:(?:搜索|文字|地址|输入)栏)?|(?:搜索|文字|地址|输入)栏)(?:里|中|内|里面)?)?(?:搜索|查找|搜一下|搜)(?:一下)?“?(.+?)”?$",
+    // A field after a window name needs a following search verb. Otherwise
+    // “在当前窗口搜索框架设计” must retain 框架设计 as the query.
+    [GeneratedRegex(@"^(?:请帮我|帮我|请|给我|麻烦你|麻烦)?\s*(?:在\s*(?:(?:当前|这个|刚才的)?(?:窗口|软件|应用|页面|浏览器)(?:(?:的\s*)?"
+        + ApplicationSearchRequest.SearchFieldPattern + @"(?=(?:里面|里|中|内)?\s*(?:请帮我|帮我|给我)?"
+        + ApplicationSearchRequest.SearchVerbPattern + @"))?|" + ApplicationSearchRequest.SearchFieldPattern
+        + @")(?:里面|里|中|内)?\s*)?(?:请帮我|帮我|给我)?" + ApplicationSearchRequest.SearchVerbPattern + @"\s*(?<query>.*)$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SearchRegex();
-
-    [GeneratedRegex(@"^(?:请|帮我|请帮我|给我)?(?:在(?:(?:当前|这个|刚才的)?(?:窗口|软件|页面|浏览器)(?:的)?(?:(?:搜索|文字|地址|输入)栏)?|(?:搜索|文字|地址|输入)栏)(?:里|中|内|里面)?)?(?:搜索|查找|搜一下|搜)",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-    private static partial Regex SearchCommandPrefixRegex();
 }

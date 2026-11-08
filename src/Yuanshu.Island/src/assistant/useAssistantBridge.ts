@@ -16,6 +16,7 @@ export function useAssistantBridge(deferProjection = false) {
   const alive = useRef(false);
   const commanding = useRef(false);
   const acknowledging = useRef(false);
+  const hasPresented = useRef(false);
   const nativeRequest = useRef<Promise<unknown> | null>(null);
   const deferredProjection = useRef(deferProjection);
   deferredProjection.current = deferProjection;
@@ -28,6 +29,7 @@ export function useAssistantBridge(deferProjection = false) {
   const fail = useCallback(() => {
     if (!alive.current) return;
     latest.current = null;
+    hasPresented.current = false;
     setSnapshot(null);
     setIntegrated(true);
   }, []);
@@ -64,6 +66,14 @@ export function useAssistantBridge(deferProjection = false) {
           latest.current = next;
           setSnapshot(next);
         }
+        // Native window visibility is a liveness signal, not proof that this
+        // revision's complete consent text was rendered. Never bootstrap the
+        // initial presentation handshake with a heartbeat.
+        if (hasPresented.current) {
+          const heartbeat = decodeAssistantResponse(await invokeNative("assistant_heartbeat", { instanceId: next.instanceId }));
+          if (disposed || expired) return;
+          if (!heartbeat?.ok || heartbeat.snapshot !== null) { fail(); return; }
+        }
         setPoll((value) => value + 1);
       } catch { if (!disposed) fail(); }
       finally {
@@ -83,6 +93,7 @@ export function useAssistantBridge(deferProjection = false) {
       const response = decodeAssistantResponse(await invokeNative("assistant_presented", { instanceId: target.instanceId, revision: target.revision }));
       // The reply is only a receipt. New state always comes through the ordered read loop.
       if ((!response?.ok || (response.snapshot && response.snapshot.instanceId !== target.instanceId)) && latest.current?.instanceId === target.instanceId && latest.current.revision === target.revision) fail();
+      else if (response?.ok) hasPresented.current = true;
     } catch {
       if (latest.current?.instanceId === target.instanceId && latest.current.revision === target.revision) fail();
     } finally { acknowledging.current = false; }

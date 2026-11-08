@@ -68,9 +68,20 @@ public sealed class BridgeSnapshotProjection(
             presentations);
     }
 
-    private static BridgePresentationDto MapTurn(Guid sessionId, SessionTurnRecord turn)
+    private BridgePresentationDto MapTurn(Guid sessionId, SessionTurnRecord turn)
     {
         var display = TurnDisplay(turn.Phase);
+        if (turn.Phase == SessionTurnPhase.WaitingForWindowConsent && turn.IntentKind == "DesktopTask")
+            display = sessions.GetWindowConsent(turn)?.Purpose == "TaskAction"
+                ? new("WaitingUser", "需要确认这一步", "请核对当前软件、操作和内容后确认这一具体步骤。", true)
+                : new("WaitingUser", "需要本次任务许可", "请确认读取指定窗口文字并交给当前模型完成本次任务。", true);
+        if (turn.Phase == SessionTurnPhase.WaitingForWindowConsent
+            && turn.IntentKind is "ApplicationSearch" or "SearchForeground")
+            display = sessions.GetWindowConsent(turn)?.Purpose == "ResultRead"
+                ? new("WaitingUser", "需要只读结果许可",
+                    "请返回元枢主窗口确认：只读取新临时窗口核对结果，不会点击、输入或发送消息。", true)
+                : new("WaitingUser", "需要视觉搜索许可",
+                    "请返回元枢主窗口确认：仅查看目标窗口并完成这次搜索，不打开结果或发送消息。", true);
         var wirePhase = turn.Phase is SessionTurnPhase.WaitingForMemoryOutboundConsent
             or SessionTurnPhase.WaitingForPointerAnswerConsent
             ? "WaitingUser"

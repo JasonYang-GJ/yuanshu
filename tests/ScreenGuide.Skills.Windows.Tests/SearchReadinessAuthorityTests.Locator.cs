@@ -261,7 +261,7 @@ public sealed partial class SearchReadinessAuthorityTests
     }
 
     private sealed class LocatorRecordingAutomation(WindowsUiAutomationService service)
-        : IReliableDesktopAutomation, IPreparedNativeSearchAutomation
+        : IReliableDesktopAutomation, IPreparedNativeSearchAutomation, IBoundApplicationSearchAutomation
     {
         public List<DesktopSearchControl?> Locators { get; } = [];
         public DesktopAutomationResult SearchWithPreparationLocator(ForegroundWindowSnapshot window, string query,
@@ -272,6 +272,13 @@ public sealed partial class SearchReadinessAuthorityTests
         }
         public DesktopAutomationResult Search(ForegroundWindowSnapshot window, string query) => service.Search(window, query);
         public DesktopAutomationResult Search(ForegroundWindowSnapshot window, string query, CancellationToken cancellation) => service.Search(window, query, cancellation);
+        public DesktopAutomationResult SearchBoundApplication(ForegroundWindowSnapshot window, string query,
+            DesktopSearchControl? locator, Func<CancellationToken, ForegroundWindowSnapshot> validateWindow,
+            CancellationToken cancellation)
+        {
+            Locators.Add(locator);
+            return service.SearchBoundApplication(window, query, locator, validateWindow, cancellation);
+        }
         public DesktopAutomationResult Describe(ForegroundWindowSnapshot window) => throw new NotSupportedException();
     }
 }

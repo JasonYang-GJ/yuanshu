@@ -231,7 +231,7 @@ public sealed class ApplicationSearchPlanningTests
     [InlineData("帮我在抖音里面搜索 AI 编程并打开第一条", "抖音", "AI 编程", "OpenFirst")]
     [InlineData("在我的新星工具里搜索“打开文件，然后播放第一首”", "我的新星工具", "打开文件,然后播放第一首", "None")]
     [InlineData("打开我的网易云，然后搜索“晴天”，播放第一首", "我的网易云", "晴天", "PlayFirst")]
-    [InlineData("在网易云里搜索最近最热的歌", "网易云", "最近最热的歌", "None")]
+    [InlineData("在网易云里搜索“最近最热的歌”", "网易云", "最近最热的歌", "None")]
     [InlineData("打开桌面上的网易云，然后搜索清单.txt", "桌面上的网易云", "清单.txt", "None")]
     public void PreservesRequestAndNeverInventsAnUnrequestedFollowUp(string text, string application, string query, string action)
     {

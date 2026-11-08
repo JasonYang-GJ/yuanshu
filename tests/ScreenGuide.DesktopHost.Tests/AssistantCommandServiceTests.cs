@@ -269,6 +269,8 @@ public sealed class AssistantCommandServiceTests
         Assert.Equal("Completed", completed.Status);
         Assert.Equal("ExecutionVerified", completed.VerificationStatus);
         Assert.Contains(completed.Evidence!.VerifiedFacts,
+            fact => fact.Contains("可靠识别的搜索框", StringComparison.Ordinal));
+        Assert.DoesNotContain(completed.Evidence.VerifiedFacts,
             fact => fact.Contains("Enter", StringComparison.Ordinal));
         Assert.Contains(completed.Evidence.UnverifiedFacts,
             fact => fact.Contains("搜索结果页面", StringComparison.Ordinal));

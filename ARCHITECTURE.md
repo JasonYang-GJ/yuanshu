@@ -1,5 +1,29 @@
 # 元枢当前架构（V0.8.0 合并候选及历史冻结背景）
 
+> 2026-11-05 新视觉路径：`ModelDesktopVisualPlanner` 将本次明确许可的单窗口 PNG 通过冻结 Qwen 路由提议标明 normalized1000 的相对坐标，本机按可信图片尺寸转换为有界像素坐标；`DesktopVisualTaskExecutionService` 仍属于原 Session/Turn，复用 TaskObservation/TaskAction。`WindowsDesktopVisualTargetPreview` 在专用 STA 显示完整图片与精确目标框，实际输入由有 JobObject 所有权的短命私有 worker 执行，点击前检查窗口、几何、DPI、完整像素、前台和落点。鼠标移动后再核对像素，按下/抬起同批发送。图片在内存中清理，不进入公共 IPC、历史或 SQLite；非视觉模型拒绝图片，不自动换路由。新 OCR 结果仍需用户核对任务是否完成。代码与验收进度见 [视觉桌面任务](docs/VISUAL_DESKTOP_TASKS.md)。
+
+> 2026-11-05 通用任务确认：`TaskObservation` 和 `TaskAction` 与搜索许可同样要求全文真实可见。灵动岛的原生可见性心跳与精确内容版本展示回执分离；心跳不建立初始握手、不登记版本、不满足展示等待、不授予语音确认。长说明无法完整展示时保留原 Turn，改为“查看确认”的手动完整内容入口；隐藏或断开仍暂停语音。文本覆盖确认展示完整旧值/新值，其它调用保留输入/选择上下文；最终执行仍比较完整快照。候选安装和真实验收状态见 [通用桌面任务](docs/GENERAL_DESKTOP_TASKS.md)。
+
+> 2026-11-04 通用桌面任务：`DesktopTaskRequest` 识别明确软件与操作包络，`SessionCoordinator` 在原 Turn 内协调许可、执行、取消与结果。`ModelDesktopTaskPlanner` 使用冻结的 provider/model 和版本化 Prompt 提议单步有限 JSON；`DesktopTaskExecutionService` 在本机重验目标、快照、效果范围和一次性能力。短命 Host worker 使用 UIA、私有匿名管道和 kill-on-close JobObject，读取与动作前验证窗口身份/前台，动作前复核完整上下文指纹；不使用鼠标坐标或键盘兜底。完整许可详情仅保留在活动 Turn 内存，经私有 IPC 展示；SQLite 只存固定等待摘要和步骤哈希。详见 [实现与验收](docs/GENERAL_DESKTOP_TASKS.md)。
+
+> 2026-11-05 Office 原生核对：可信 Word 纯正文和 Excel 单格通过指定 HWND 下的 NativeOM 对象读取、写入和回读，不使用全局活动文档或工作簿。Excel 的 UIA ValuePattern 曾返回与工作表不符的成功值，现有修正以 Window/Workbook/Sheet/Range 身份、A1 地址、GridItem 行列和写前旧值共同绑定，结果读取 Range.Value2。普通文字及可精确回读的数字之外，公式、合并格、保护、宏及结构化表格不开放写入；具体已通过版本和范围以验收记录为准。
+
+> 2026-11-04 应用语音纠正：规划器与桌面文件解析共用有限句首纠正规范化；原 Turn 文本保持。应用目录完整登记名优先，英文部分名称在原始名称的词边界匹配；一处拼写差异只生成无执行权限的候选名称。完整桌面枚举没有文档匹配时，Host 保留应用澄清；有真实文档则沿用文件确认。Steam 打开动作支持精确安装根下两种固定 helper 布局，读取 OS 直接父关系并校验各自句柄创建时间、路径和存活状态，激活前后重验身份；仅选唯一 `SDL_app / Steam` 主窗口，身份变化即停止。搜索仍使用原 `MatchesRegisteredTarget` 合同。目标绑定、语音单次授权、取消与协议/数据库保持原合同，见 [修复与验收](docs/VOICE_APPLICATION_CORRECTIONS.md)。
+
+> 2026-11-03 连续音乐任务：`MusicChart` 贯穿规划和目标摘要，固定榜单解析器只提供公开元数据；单个 `ApplicationSearchWorkflow` 承担打开、搜索和后续播放，仍由唯一 `SessionCoordinator` 协调。已绑定应用的搜索入口允许仅标题变化，逐步重验应用、进程生命周期、路径、窗口与前台；普通窗口及捕获身份合同不放宽。播放使用已绑定程序的固定数字曲目协议，原生页脚验证状态变化，Host 与 Skill 均核验音乐收据。详见 [实现与验收边界](docs/CONTINUOUS_MUSIC_WORKFLOW.md)。
+
+> 2026-11-02 简短应答：`VoiceReceptionGate` 在 Direct 下区分本机 Call 和精确 Stop；呼唤不提交 Host。`LocalVoiceReplyPresentation` 仅保存绑定当前状态的临时界面反馈，不是另一份会话或任务。普通/所选记忆统一 `chat.general@3`，记忆预览与执行哈希一致；旧提示文件不变。视觉许可播报挂起保留已消费/撤销记录，新的可见准备才绑定新语音代次。细节见 [简短语音应答](docs/CONCISE_VOICE_RESPONSES.md)。
+
+> 2026-10-25 搜索许可分流补充：仅接近完整搜索许可的句尾“搜索”可作为名词保留在本地澄清，前面的搜索/打开或附加操作仍视为新任务。新增精确短句“允许这次搜索 / 拒绝这次搜索”，原长句兼容；近似匹配不进入授权。结果提示明确请勿切换或点击其它窗口，未改变焦点行为、逐窗许可或 Session 状态。
+
+> 2026-10-25 视觉许可语音分流：等待逐窗许可时，中间转写暂缓替换原请求，明确停止仍优先；完整新指令沿用原取消与替换流程。接近许可短句的错误转写仅更新当前私有许可详情为重说提示，不送聊天或产生授权。读取结果支持更短的精确短句，原完整句兼容；用途、ConsentId、窗口、Host/Session/Turn、已展示提示与识别代次约束不变，不增加 Session 状态源。
+
+> 2026-10-22 视觉许可展示：灵动岛只对两种视觉许可状态优先展示完整私有详情及用途明确的语音短句。展示回执校验当前实例、版本、完整文字、展开状态与窗口内的真实可见范围，不能在详情被折叠或挤出区域时提前回执；回执不授予操作权限。通用 Core Bridge 继续只投影固定安全文案，Host 的 Session/Turn 与逐窗 ConsentId 授权边界不变。
+
+> 2026-10-22 当前窗口搜索：`IVisualSearchAutomation` 仅在原生搜索未找到控件且尚未输入时接管。原生候选必须有明确名称/关联标签或独立核实的原生搜索证明；内部编号/帮助文字不单独授权，多可靠候选拒绝。图像读取、输入、窗口身份与结果验证分离；优先精确搜索提示，其次依据当前图的放大镜和分离文字定位已有查询。写入前检查窗口、几何、当前控件与框内光标；写入后精确回读查询及结果。`VisualSearchConsentChannel` 在原 SessionCoordinator 执行内挂起，主窗口搜索与一个直属结果窗口分别使用新 ConsentId；语音许可绑定已显示提示、用途和新的识别代数，授权不持久化、不重放。视觉数据只在本机调用内存中处理。范围与实测见 [当前窗口搜索](docs/CURRENT_WINDOW_SEARCH.md)。
+
+> 2026-10-22 候选修复：手动打开入口向单实例通道传递显式语音启动意图；可见助手初始化合并，停止版本阻止等待初始化的旧打开请求迟到开启麦克风。Host 在未绑定文件的自然桌面打开请求中联合可信应用目录与文档发现进行分流，保留明确文件、同名歧义、应用身份和确认边界。等待原因通过现有私有助手显示通道呈现，通用 Core Bridge 继续只投影固定安全文案。当前窗口通用点击/填写仍未实现；交付状态见 [修复记录](docs/STARTUP_VOICE_AND_DESKTOP_APPLICATION_FIX.md)。
+
 > 2026-10-19 语音修复：仅在本地待命时，将完整的“元枢/元书/原书/袁叔/袁书”及对应“你好”形式归为唤醒词，解决普通离线识别词表缺“枢”的问题；普通对话保留原文字。规范词同时经过现有回声过滤，过渡状态与前后识别重置防止同段重放。唤醒只改变本地接收模式，不创建 Host 请求或授权动作；新请求仍经 SessionCoordinator。撤回未通过真人验收的额外声学唤醒组件，不改变原 ASR 端点与麦克风授权。首个无 Session 的 Voice Turn 由原 Host 回执绑定一次性播报资格。详见 [真人语音与模型验收](docs/UNIFIED_PRODUCT_REAL_USAGE.md)。
 
 > 2026-10-19 完整合并：`src/Yuanshu.Island` 是同仓组件，`build-yuanshu.ps1` 从源码构建 Client、Host 和 Island 并交给唯一 Inno 安装器。Client 按安装相对路径加载 `island/yuanshu-island.exe`，为所有启动入口建立同一显示桥；Tauri 不再注册托盘或独立自启。元枢拥有托盘、语音授权、子进程生命周期；岛通过现有协议投影状态。激活参数只打开已有实例。用户路径配置在安装目录外且不含凭据，隔离环境变量优先。详见 [统一构建](docs/UNIFIED_PRODUCT_BUILD.md)。

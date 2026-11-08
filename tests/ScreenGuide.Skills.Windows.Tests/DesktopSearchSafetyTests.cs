@@ -343,13 +343,13 @@ public sealed class DesktopSearchSafetyTests
     }
 
     [Fact]
-    public void UniqueHighestConfidenceCandidateWinsWithoutTryingAnotherField()
+    public void StrongNamedCandidateWinsWhileMetadataOnlyFieldIsExcluded()
     {
         var expected = Window();
         var driver = new FakeSearchDriver(
         [
             Control("primary", name: "地址和搜索栏"),
-            Control("secondary", automationId: "search")
+            Control("secondary", name: "推荐内容", automationId: "search", helpText: "搜索")
         ]);
 
         Executor(expected, driver).Search(expected, "周杰伦");
@@ -358,6 +358,48 @@ public sealed class DesktopSearchSafetyTests
         Assert.Equal(string.Empty, driver.Value("secondary"));
         Assert.Equal(1, driver.SetValueCount);
         Assert.Equal(1, driver.SubmitCount);
+        Assert.Equal(1, driver.FocusCount);
+    }
+
+    [Theory]
+    [InlineData("", "")]
+    [InlineData("推荐内容", "")]
+    [InlineData("推荐内容", "ia2:9:-10")]
+    [InlineData("find", "ia2:9:-10")]
+    public void InternalIdAndHelpCannotTurnAnUnprovenFieldIntoSearch(string name, string nativeIdentity)
+    {
+        var expected = Window();
+        var field = Control("embedded", name: name, automationId: "search", helpText: "搜索");
+        field = field with { Snapshot = field.Snapshot with
+            { NativeSearchIdentity = nativeIdentity, HasNativeSearchSemantics = false } };
+        var driver = new FakeSearchDriver([field]);
+
+        Assert.False(SafeForegroundSearchExecutor.IsReliableCandidate(field.Snapshot, expected.WindowHandle));
+        var error = Assert.Throws<DesktopSearchException>(() => Executor(expected, driver).Search(expected, "示例"));
+
+        Assert.Equal(DesktopSearchErrorCodes.CandidateNotFound, error.Code);
+        Assert.Equal(0, driver.FocusCount);
+        Assert.Equal(0, driver.SetValueCount);
+        Assert.Equal(0, driver.SubmitCount);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void TwoStrongCandidatesAreAmbiguousEvenWhenScoresDiffer(bool nativeSecond)
+    {
+        var expected = Window();
+        var second = Control("second", name: nativeSecond ? "公开推荐" : "搜索框", automationId: "search", helpText: "搜索");
+        if (nativeSecond) second = second with { Snapshot = second.Snapshot with
+            { NativeSearchIdentity = "ia2:9:-10", HasNativeSearchSemantics = true } };
+        var driver = new FakeSearchDriver([Control("first", name: "搜索框"), second]);
+
+        var error = Assert.Throws<DesktopSearchException>(() => Executor(expected, driver).Search(expected, "示例"));
+
+        Assert.Equal(DesktopSearchErrorCodes.CandidateAmbiguous, error.Code);
+        Assert.Equal(0, driver.FocusCount);
+        Assert.Equal(0, driver.SetValueCount);
+        Assert.Equal(0, driver.SubmitCount);
     }
 
     [Fact]
@@ -374,6 +416,7 @@ public sealed class DesktopSearchSafetyTests
             () => Executor(expected, driver).Search(expected, "天气"));
 
         Assert.Equal(DesktopSearchErrorCodes.CandidateAmbiguous, exception.Code);
+        Assert.Equal(0, driver.FocusCount);
         Assert.Equal(0, driver.SetValueCount);
         Assert.Equal(0, driver.SubmitCount);
     }
@@ -387,7 +430,8 @@ public sealed class DesktopSearchSafetyTests
         var exception = Assert.Throws<DesktopSearchException>(
             () => Executor(expected, driver).Search(expected, "天气"));
 
-        Assert.Equal(DesktopSearchErrorCodes.CandidateAmbiguous, exception.Code);
+        Assert.Equal(DesktopSearchErrorCodes.CandidateNotFound, exception.Code);
+        Assert.Equal(0, driver.FocusCount);
         Assert.Equal(0, driver.SetValueCount);
         Assert.Equal(0, driver.SubmitCount);
     }
@@ -765,6 +809,8 @@ public sealed class DesktopSearchSafetyTests
 
         public int SetValueCount { get; private set; }
 
+        public int FocusCount { get; private set; }
+
         public int SubmitCount { get; private set; }
 
         public string Value(string id) => _states[id].Value;
@@ -801,6 +847,7 @@ public sealed class DesktopSearchSafetyTests
 
         public void Focus(DesktopSearchControl control)
         {
+            FocusCount++;
             var id = (string)control.NativeReference;
             _states[id] = _states[id] with { HasKeyboardFocus = true };
         }

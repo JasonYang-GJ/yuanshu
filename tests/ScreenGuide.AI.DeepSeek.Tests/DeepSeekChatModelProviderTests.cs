@@ -10,6 +10,23 @@ namespace ScreenGuide.AI.DeepSeek.Tests;
 public sealed class DeepSeekChatModelProviderTests
 {
     [Fact]
+    public async Task ImagesAreRejectedBeforeCredentialsAndHttpInsteadOfBeingSilentlyDiscarded()
+    {
+        using var image = new ChatImage(Convert.FromBase64String(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGP4/x8AAwAB//wl3FEAAAAASUVORK5CYII="));
+        var credentials = new TestCredentialStore("synthetic-key");
+        var handler = new StubHttpMessageHandler(_ => throw new InvalidOperationException("Must not send."));
+        await using var provider = new DeepSeekChatModelProvider(credentials, handler);
+        var request = new ChatModelRequest(Guid.NewGuid(), Guid.NewGuid(), DeepSeekChatModelProvider.FlashModelId,
+            "system", [new(ChatMessageRole.User, "synthetic", Images: [image])]);
+        var error = await Assert.ThrowsAsync<ChatModelException>(() => provider.CompleteAsync(request));
+        Assert.Equal("chat.vision_not_supported", error.Error.Code);
+        Assert.Equal(0, credentials.OpenLeaseCount);
+        Assert.Equal(0, handler.SendCount);
+        Assert.False(image.IsDisposed);
+    }
+
+    [Fact]
     public async Task DescriptorExposesOnlyTheFixedDeepSeekDestinationAndOfficialModels()
     {
         await using var provider = new DeepSeekChatModelProvider(

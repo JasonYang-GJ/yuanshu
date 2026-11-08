@@ -139,7 +139,7 @@ public sealed partial class SearchReadinessAuthorityTests
         setup.Prepare();
         setup.Input.OnDiscover = () => setup.Windows.Foreground = 43;
 
-        Assert.Throws<DesktopSearchException>(() => setup.Search());
+        Assert.Throws<ApplicationSearchWorkflowException>(() => setup.Search());
 
         Assert.Equal(1, setup.Input.Discoveries);
         AssertNoInput(setup.Input);
@@ -180,7 +180,8 @@ public sealed partial class SearchReadinessAuthorityTests
             });
         };
 
-        Assert.Throws<DesktopSearchException>(() => setup.Search());
+        if (change == "foreground") Assert.Throws<ApplicationSearchWorkflowException>(() => setup.Search());
+        else Assert.Throws<DesktopSearchException>(() => setup.Search());
 
         Assert.Equal(1, setup.Input.Discoveries);
         Assert.Equal(1, setup.Input.Focuses);
@@ -207,6 +208,7 @@ public sealed partial class SearchReadinessAuthorityTests
         public Windows Windows { get; } = new();
         public InputDriver Input { get; }
         public RecordingAutomation Automation { get; }
+        public Action ValidateTarget { get; set; } = () => { };
         public int HintReads { get; private set; }
         public int PageReads { get; private set; }
         public int ResultDiscoveries { get; private set; }
@@ -241,7 +243,7 @@ public sealed partial class SearchReadinessAuthorityTests
         }
 
         public void Search(CancellationToken cancellation = default) =>
-            _workflow.Search(_opened ?? throw new InvalidOperationException("Prepare first"), Query, cancellation);
+            _workflow.Search(_opened ?? throw new InvalidOperationException("Prepare first"), Query, ValidateTarget, cancellation);
 
         public SearchResultPage ReadResults(string query = Query, CancellationToken cancellation = default) =>
             _workflow.ReadResults(Windows.Current, query, cancellation);
@@ -252,7 +254,8 @@ public sealed partial class SearchReadinessAuthorityTests
     }
 
     // Transparent recording wrapper around the real service, so tests can inspect its receipt.
-    private sealed class RecordingAutomation(WindowsUiAutomationService service) : IReliableDesktopAutomation
+    private sealed class RecordingAutomation(WindowsUiAutomationService service) : IReliableDesktopAutomation,
+        IBoundApplicationSearchAutomation
     {
         public DesktopAutomationResult? LastResult { get; private set; }
         public DesktopAutomationResult Search(ForegroundWindowSnapshot window, string query) => Search(window, query, default);
@@ -260,6 +263,13 @@ public sealed partial class SearchReadinessAuthorityTests
         {
             LastResult = null;
             return LastResult = service.Search(window, query, cancellation);
+        }
+        public DesktopAutomationResult SearchBoundApplication(ForegroundWindowSnapshot window, string query,
+            DesktopSearchControl? locator, Func<CancellationToken, ForegroundWindowSnapshot> validateWindow,
+            CancellationToken cancellation)
+        {
+            LastResult = null;
+            return LastResult = service.SearchBoundApplication(window, query, locator, validateWindow, cancellation);
         }
         public DesktopAutomationResult Describe(ForegroundWindowSnapshot window) => throw new NotSupportedException();
     }
@@ -296,6 +306,8 @@ public sealed partial class SearchReadinessAuthorityTests
         public IReadOnlyList<DesktopSearchControl> Controls { get; set; } = [Control("final-a", "input-a")];
         public Action? OnDiscover { get; set; }
         public Action? OnRead { get; set; }
+        public Action? AfterFocus { get; set; }
+        public Action? AfterWrite { get; set; }
         public Action? BeforeSubmit { get; set; }
         public int Discoveries { get; private set; }
         public int Reads { get; private set; }
@@ -328,6 +340,7 @@ public sealed partial class SearchReadinessAuthorityTests
         {
             Focuses++;
             Mutate((string)control.NativeReference, state => state with { HasKeyboardFocus = true });
+            AfterFocus?.Invoke();
         }
         public void SetValue(DesktopSearchControl control, string value)
         {
@@ -335,6 +348,7 @@ public sealed partial class SearchReadinessAuthorityTests
             LastWrittenReference = (string)control.NativeReference;
             LastWrittenValue = value;
             Mutate(LastWrittenReference, state => state with { Value = value });
+            AfterWrite?.Invoke();
         }
         public void SubmitEnter(DesktopSearchControl control, Action validateAtSendBoundary)
         {

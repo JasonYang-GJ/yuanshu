@@ -1,7 +1,7 @@
 namespace ScreenGuide.DesktopClient.Services;
 
 public enum VoiceReceptionMode { Direct, Transitioning, Standby }
-public enum VoiceReceptionDecision { Ignore, Submit, Rest, Wake }
+public enum VoiceReceptionDecision { Ignore, Submit, Rest, Wake, Call, Stop }
 
 /// <summary>Local microphone reception only; it neither creates nor owns a Session or Turn.</summary>
 public sealed class VoiceReceptionGate
@@ -32,14 +32,35 @@ public sealed class VoiceReceptionGate
         var phrase = string.Concat(text.Where(character => !char.IsWhiteSpace(character) && !char.IsPunctuation(character)));
         if (Mode == VoiceReceptionMode.Standby)
             return CanonicalWakePhrase(phrase) is not null ? VoiceReceptionDecision.Wake : VoiceReceptionDecision.Ignore;
+        if (IsStopPhrase(phrase)) return VoiceReceptionDecision.Stop;
+        if (CanonicalWakePhrase(phrase) is not null) return VoiceReceptionDecision.Call;
         return phrase is "退下" or "先休息" ? VoiceReceptionDecision.Rest : VoiceReceptionDecision.Submit;
     }
+
+    public static bool IsStopPhrase(string text)
+    {
+        var phrase = string.Concat(text.Where(character => !char.IsWhiteSpace(character) && !char.IsPunctuation(character)));
+        return phrase is "停" or "停一下" or "停停" or "停停停" or "停止" or "停止说话";
+    }
+
+    public static bool IsCallPrefix(string text)
+    {
+        var phrase = string.Concat(text.Where(character => !char.IsWhiteSpace(character) && !char.IsPunctuation(character)));
+        return phrase.Length > 0 && CallPhrases.Any(candidate => candidate.StartsWith(phrase, StringComparison.Ordinal));
+    }
+
+    private static readonly string[] CallPhrases =
+    [
+        "元枢", "元书", "原书", "袁叔", "袁书",
+        "你好元枢", "你好元书", "你好原书", "你好袁叔", "你好袁书"
+    ];
 
     public static string? CanonicalWakePhrase(string text)
     {
         var phrase = string.Concat(text.Where(character => !char.IsWhiteSpace(character) && !char.IsPunctuation(character)));
         // The local ASR vocabulary lacks 枢. Only these complete, observed
-        // homophone spellings may wake standby; never replace ordinary input.
+        // homophone spellings may wake standby or acknowledge a complete call;
+        // never rewrite or split an ordinary question or action.
         return phrase switch
         {
             "元枢" or "元书" or "原书" or "袁叔" or "袁书" => "元枢",

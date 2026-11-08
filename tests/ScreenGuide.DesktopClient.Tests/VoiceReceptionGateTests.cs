@@ -64,11 +64,11 @@ public sealed class VoiceReceptionGateTests
     }
 
     [Fact]
-    public void HomophoneWakeRemainsOrdinaryTextOutsideStandbyAndRejectsStaleAudio()
+    public void HomophoneCallIsLocalInDirectModeAndRejectsStaleAudio()
     {
         var gate = new VoiceReceptionGate();
         gate.SynchronizeMicrophone(7, 2);
-        Assert.Equal(VoiceReceptionDecision.Submit, gate.Classify("元书", 7, 2));
+        Assert.Equal(VoiceReceptionDecision.Call, gate.Classify("元书", 7, 2));
         var transition = gate.BeginTransition();
         Assert.Equal(VoiceReceptionDecision.Ignore, gate.Classify("元书", 7, 2));
         Assert.True(gate.CompleteTransition(transition, 7, 3, VoiceReceptionMode.Standby));
@@ -78,4 +78,42 @@ public sealed class VoiceReceptionGateTests
         gate.SynchronizeMicrophone(null, 4);
         Assert.Equal(VoiceReceptionDecision.Ignore, gate.Classify("元书", 7, 3));
     }
+
+    [Theory]
+    [InlineData("元枢", VoiceReceptionDecision.Call)]
+    [InlineData("你好，元枢。", VoiceReceptionDecision.Call)]
+    [InlineData("你好袁叔", VoiceReceptionDecision.Call)]
+    [InlineData("元书", VoiceReceptionDecision.Call)]
+    [InlineData("停", VoiceReceptionDecision.Stop)]
+    [InlineData("停，停！", VoiceReceptionDecision.Stop)]
+    [InlineData("停停停", VoiceReceptionDecision.Stop)]
+    [InlineData("停一下", VoiceReceptionDecision.Stop)]
+    [InlineData("停止说话", VoiceReceptionDecision.Stop)]
+    [InlineData("停止", VoiceReceptionDecision.Stop)]
+    [InlineData("元枢打开记事本", VoiceReceptionDecision.Submit)]
+    [InlineData("你好元枢，什么是彩虹", VoiceReceptionDecision.Submit)]
+    [InlineData("这本原书讲什么", VoiceReceptionDecision.Submit)]
+    [InlineData("停止播放音乐", VoiceReceptionDecision.Submit)]
+    [InlineData("请解释停停这个词", VoiceReceptionDecision.Submit)]
+    public void DirectControlPhrasesAreExactAndCannotSwallowRequests(string text, VoiceReceptionDecision expected)
+    {
+        var gate = new VoiceReceptionGate();
+        gate.SynchronizeMicrophone(9, 3);
+        Assert.Equal(expected, gate.Classify(text, 9, 3));
+        Assert.Equal(VoiceReceptionDecision.Ignore, gate.Classify(text, 9, 2));
+        Assert.Equal(VoiceReceptionDecision.Ignore, gate.Classify(text, 8, 3));
+    }
+
+    [Theory]
+    [InlineData("你", true)]
+    [InlineData("你好，袁", true)]
+    [InlineData("元", true)]
+    [InlineData("元枢", true)]
+    [InlineData("你好元枢打开记事本", false)]
+    [InlineData("你好有个问题", false)]
+    [InlineData("元枢帮我", false)]
+    [InlineData("停停", false)]
+    [InlineData("", false)]
+    public void OnlyIncompleteOrCompletePureCallsDeferPartialReplacement(string text, bool expected) =>
+        Assert.Equal(expected, VoiceReceptionGate.IsCallPrefix(text));
 }

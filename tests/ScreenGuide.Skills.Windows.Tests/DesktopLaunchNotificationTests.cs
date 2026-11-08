@@ -55,7 +55,8 @@ public sealed class DesktopLaunchNotificationTests
 
     private static readonly KnownDesktopApplication App = new("test", "测试音乐", @"C:\Fixture\cloudmusic.exe");
     private static readonly ApplicationWindowSnapshot Window = new(new IntPtr(42), "测试音乐",
-        new(123, "cloudmusic", DateTimeOffset.UnixEpoch, true, App.LaunchTarget, null, null, null));
+        new(123, "cloudmusic", DateTimeOffset.UnixEpoch, true, App.LaunchTarget, null, null, null))
+        { ClassName = "OrpheusBrowserHost" };
     private sealed class Runtime : IApplicationActivationRuntime
     {
         private long _ticks;

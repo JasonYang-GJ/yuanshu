@@ -218,7 +218,14 @@ public sealed record ProvideSessionFileRequestDto(
 public sealed record SessionWindowConsentRequestDto(
     Guid SessionId,
     Guid TurnId,
-    bool Granted);
+    bool Granted,
+    Guid? ConsentId = null);
+
+public sealed record SessionWindowConsentDto(
+    Guid ConsentId,
+    string Purpose,
+    long WindowHandle,
+    string WindowTitle);
 
 public sealed record SessionTurnConfirmationRequestDto(
     Guid SessionId,
@@ -323,7 +330,8 @@ public sealed record UnifiedSessionTurnDto(
     string? PlanTarget = null,
     string MemoryOutboundState = "None",
     Guid? MemoryOutboundConsentId = null,
-    string? MemoryOutboundManifestHash = null);
+    string? MemoryOutboundManifestHash = null,
+    SessionWindowConsentDto? WindowConsent = null);
 
 public sealed record MemoryOutboundPreparedItemDto(
     Guid MemoryId,

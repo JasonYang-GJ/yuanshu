@@ -7,6 +7,33 @@ namespace ScreenGuide.Tasking.Tests;
 
 public sealed class SqliteSessionStoreTests
 {
+    [Theory]
+    [InlineData("ApplicationSearch")]
+    [InlineData("SearchForeground")]
+    public async Task RestartInterruptsAnInFlightVisualSearchConsentWithoutMakingItRetryable(string intent)
+    {
+        await using var environment = await SessionStoreEnvironment.CreateAsync();
+        var session = await environment.CreateSessionAsync("视觉搜索重启边界");
+        var registration = await environment.Store.StartTurnAsync(session.Id, "搜索资料", "Voice",
+            "visual-consent-restart", CreateReadyRoute(environment.Now), environment.Now);
+        await environment.Store.UpdateTurnAsync(registration.Turn with
+        {
+            Phase = SessionTurnPhase.WaitingForWindowConsent,
+            MissingContext = SessionMissingContext.WindowConsent,
+            IntentKind = intent,
+            OperationId = "original-command",
+            FailureCode = "visual_search_consent_required",
+            ConfirmationGranted = false,
+            WindowHandle = 1234,
+            WindowTitle = "测试窗口"
+        }, registration.Turn.Version, environment.Now);
+        await environment.Store.RecoverInterruptedAsync(environment.Now.AddMinutes(1));
+        var recovered = await environment.Store.GetTurnAsync(registration.Turn.Id);
+        Assert.Equal(SessionTurnPhase.Interrupted, recovered!.Phase);
+        Assert.Equal("host_restarted", recovered.FailureCode);
+        Assert.False(recovered.ConfirmationGranted);
+    }
+
     [Fact]
     public async Task NewTurnPersistsReadyFrozenRouteAcrossAStoreRestart()
     {

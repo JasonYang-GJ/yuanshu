@@ -69,6 +69,11 @@
 .assistant-transcript p, .assistant-response p { margin: 0; font-size: 14px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
 .assistant-transcript__text { max-height: 68px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #486169 transparent; }
 .assistant-response p { color: #d7e6e7; }
+.assistant-island[data-visual-consent="true"] .assistant-details { grid-template-rows: 40px minmax(0, 1fr) 32px; gap: 8px; padding-block: 12px; }
+.assistant-island[data-visual-consent="true"] .assistant-reading { padding-block: 6px; }
+.assistant-island[data-visual-consent="true"] .assistant-phase { margin-bottom: 6px; }
+.assistant-island[data-visual-consent="true"] .assistant-consent { margin-bottom: 0; }
+.assistant-island[data-visual-consent="true"] .assistant-consent p { font-size: 12px; line-height: 1.5; }
 .assistant-hint { margin: 0; color: #b7cccf; font-size: 13px; line-height: 1.7; }
 .assistant-command-error { margin: 10px 0 0; color: #ffdbcf; font-size: 12px; line-height: 1.6; }
 .assistant-controls { display: flex; align-items: center; gap: 8px; }

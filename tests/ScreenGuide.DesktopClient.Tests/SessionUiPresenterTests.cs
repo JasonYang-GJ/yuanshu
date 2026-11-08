@@ -1,3 +1,4 @@
+using System.Text.Json;
 using ScreenGuide.DesktopClient.Services;
 using ScreenGuide.DesktopProtocol;
 
@@ -5,6 +6,49 @@ namespace ScreenGuide.DesktopClient.Tests;
 
 public sealed class SessionUiPresenterTests
 {
+    [Fact]
+    public void ResultReadConsentShowsTheNewWindowAndDoesNotOfferAnotherSearch()
+    {
+        var snapshot = Snapshot("WaitingForWindowConsent");
+        var id = Guid.NewGuid();
+        var turn = snapshot.Turns.Single() with
+        {
+            IntentKind = "ApplicationSearch",
+            WindowConsent = new(id, "ResultRead", 42, "测试应用的临时窗口"),
+            ResultSummary = "只读取这个窗口核对结果，不会点击、输入或发送消息。"
+        };
+        var presentation = SessionUiPresenter.Present(snapshot with
+            { ForegroundTurn = turn, Turns = [turn], ActiveTurns = [turn] });
+        Assert.Equal("需要你允许只读核对临时窗口中的搜索结果", presentation.StatusText);
+        Assert.Equal("仅允许读取这次搜索结果", presentation.PrimaryActionText);
+        Assert.Contains("目标窗口：测试应用的临时窗口", presentation.DetailText);
+        Assert.DoesNotContain("目标窗口：阶段一窗口", presentation.DetailText);
+        Assert.True(presentation.ShowStop);
+        Assert.True(presentation.ShowWindowConsent);
+        var serialized = DesktopProtocolJson.ToElement(turn);
+        var roundTrip = serialized.Deserialize<UnifiedSessionTurnDto>(DesktopProtocolJson.Options)!;
+        Assert.Equal(id, roundTrip.WindowConsent!.ConsentId);
+        Assert.Equal(42, roundTrip.WindowConsent.WindowHandle);
+        Assert.Equal(turn.WindowHandle, roundTrip.WindowHandle);
+    }
+
+    [Theory]
+    [InlineData("ApplicationSearch")]
+    [InlineData("SearchForeground")]
+    public void VisualSearchConsentNamesTheActionAndKeepsStopAvailable(string intent)
+    {
+        var snapshot = Snapshot("WaitingForWindowConsent");
+        var turn = snapshot.Turns.Single() with { IntentKind = intent,
+            ResultSummary = "仅查看本窗口，点击搜索框并输入资料；不打开结果或发送消息。" };
+        var presentation = SessionUiPresenter.Present(snapshot with
+            { ForegroundTurn = turn, Turns = [turn], ActiveTurns = [turn] });
+        Assert.Equal("需要你允许查看窗口并执行这次搜索", presentation.StatusText);
+        Assert.Equal("允许查看并搜索这一次", presentation.PrimaryActionText);
+        Assert.True(presentation.ShowStop);
+        Assert.True(presentation.ShowWindowConsent);
+        Assert.Contains("不打开结果或发送消息", presentation.DetailText);
+    }
+
     [Theory]
     [InlineData("正在打开网易云音乐…")]
     [InlineData("正在查找最近发行的歌曲…")]

@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text.Json;
 using ScreenGuide.AI.Core;
 using ScreenGuide.Core.Ai;
 using ScreenGuide.Core.Conversations;
@@ -26,7 +27,7 @@ public interface ISessionMemoryConsentPublicationObserver
 /// Desktop Host 中唯一的当前会话与前台 Turn 协调入口。
 /// 它只协调状态和取消，不拥有任何项目、文件、窗口或电脑动作授权。
 /// </summary>
-public sealed class SessionCoordinator
+public sealed partial class SessionCoordinator
 {
     private const int MaximumInputLength = 20_000;
     private readonly ISessionStore sessionStore;
@@ -45,6 +46,9 @@ public sealed class SessionCoordinator
     private readonly IForegroundWindowContextProvider foregroundWindows;
     private readonly TimeProvider timeProvider;
     private readonly ApplicationSearchProgressChannel applicationSearchProgress;
+    private readonly VisualSearchConsentChannel visualSearchConsent;
+    private readonly DesktopTaskInteractionChannel desktopTaskInteractions;
+    private readonly IVisualSearchResultWindowVerifier? visualSearchResultWindows;
     private readonly SemaphoreSlim _currentSessionGate = new(1, 1);
     private readonly ConcurrentDictionary<Guid, ActiveSessionWork> _activeWork = new();
     private readonly ConcurrentDictionary<Guid, ActiveTaskMonitor> _taskMonitors = new();
@@ -72,7 +76,10 @@ public sealed class SessionCoordinator
         IEnumerable<ISessionMemoryConsentPublicationObserver> memoryConsentPublicationObservers,
         IForegroundWindowContextProvider foregroundWindows,
         TimeProvider timeProvider,
-        ApplicationSearchProgressChannel? applicationSearchProgress = null)
+        ApplicationSearchProgressChannel? applicationSearchProgress = null,
+        VisualSearchConsentChannel? visualSearchConsent = null,
+        IVisualSearchResultWindowVerifier? visualSearchResultWindows = null,
+        DesktopTaskInteractionChannel? desktopTaskInteractions = null)
     {
         this.sessionStore = sessionStore;
         this.projections = projections;
@@ -90,6 +97,9 @@ public sealed class SessionCoordinator
         this.foregroundWindows = foregroundWindows;
         this.timeProvider = timeProvider;
         this.applicationSearchProgress = applicationSearchProgress ?? new ApplicationSearchProgressChannel();
+        this.visualSearchConsent = visualSearchConsent ?? new VisualSearchConsentChannel();
+        this.visualSearchResultWindows = visualSearchResultWindows;
+        this.desktopTaskInteractions = desktopTaskInteractions ?? new DesktopTaskInteractionChannel();
     }
 
     public async Task<LocalSessionSnapshot?> GetCurrentAsync(
@@ -484,7 +494,8 @@ public sealed class SessionCoordinator
         Guid sessionId,
         Guid turnId,
         bool granted,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Guid? consentId = null)
     {
         RequireStartedHost();
         var gate = await operationGates.AcquireTurnAsync(turnId, cancellationToken)
@@ -500,7 +511,68 @@ public sealed class SessionCoordinator
                     cancellationToken)
                 .ConfigureAwait(false);
             session = required.Session;
-            if (!granted)
+            if (required.Turn.FailureCode == DesktopTaskConsentCode)
+            {
+                active = await RespondDesktopTaskConsentAsync(required.Turn, granted, consentId, cancellationToken);
+            }
+            else if (required.Turn.FailureCode == "visual_search_consent_required")
+            {
+                if (!_activeWork.TryGetValue(turnId, out active) || active.VisualConsent is not { } pending)
+                    throw new InvalidOperationException("这次视觉搜索已中断，请重新下达指令；不会重放原来的操作。");
+                if (consentId is null || consentId == Guid.Empty || consentId != pending.ConsentId
+                    || required.Turn.Version != pending.TurnVersion)
+                    throw new UnauthorizedAccessException("这个窗口许可已失效，请查看当前窗口请求；旧确认不会授权新窗口。");
+
+                if (!granted)
+                {
+                    await TransitionAsync(turnId, current => current with
+                    {
+                        Phase = SessionTurnPhase.Cancelled,
+                        MissingContext = SessionMissingContext.None,
+                        CancellationRequested = true,
+                        ConfirmationGranted = false,
+                        ResultSummary = pending.Request.Purpose == VisualSearchConsentPurpose.ResultRead
+                            ? "你没有同意查看这个临时窗口，结果尚未核对；没有继续点击或输入。"
+                            : "你没有同意查看并搜索这个窗口，任务已安全结束。",
+                        FailureCode = "window_consent_rejected",
+                        FailureMessage = "未获得本次视觉搜索授权。",
+                        CompletedAtUtc = timeProvider.GetUtcNow()
+                    }, cancellationToken).ConfigureAwait(false);
+                    CancelActiveWork(active);
+                }
+                else
+                {
+                    try
+                    {
+                        if (active.Cancellation.IsCancellationRequested
+                            || timeProvider.GetUtcNow() >= pending.ExpiresAtUtc
+                            || required.Turn.OperationId != pending.OperationId
+                            || required.Turn.PlanTarget != pending.PlanTarget
+                            || !MatchesPlannedExpectation(required.Turn)
+                            || !MatchesPersistedWindowIdentity(required.Turn))
+                            throw new WindowIdentityException(WindowIdentityErrorCodes.Changed,
+                                "目标窗口、搜索范围或本次许可已经变化，视觉搜索已停止；请重新下达指令。");
+                        VerifyVisualSearchWindows(pending.Request);
+                        await TransitionAsync(turnId, current => current with
+                        {
+                            Phase = SessionTurnPhase.Executing,
+                            MissingContext = SessionMissingContext.None,
+                            ConfirmationGranted = true,
+                            FailureCode = null,
+                            FailureMessage = null,
+                            ResultSummary = pending.Request.Purpose == VisualSearchConsentPurpose.ResultRead
+                                ? "正在本机只读核对这个临时窗口中的搜索结果；不会点击、输入或发送消息。"
+                                : "正在本机查看已允许的窗口并完成这次搜索；不会打开结果或发送消息。"
+                        }, cancellationToken).ConfigureAwait(false);
+                        pending.Completion.TrySetResult();
+                    }
+                    catch (Exception exception) when (exception is WindowIdentityException or UnauthorizedAccessException)
+                    {
+                        pending.Completion.TrySetException(exception);
+                    }
+                }
+            }
+            else if (!granted)
             {
                 await TransitionAsync(
                         required.Turn.Id,
@@ -547,7 +619,7 @@ public sealed class SessionCoordinator
 
         if (active is not null)
         {
-            await active.Completion.WaitAsync(cancellationToken).ConfigureAwait(false);
+            await active.WaitForVisiblePauseOrCompletionAsync(cancellationToken).ConfigureAwait(false);
         }
 
         return await BuildSnapshotAsync(session, cancellationToken).ConfigureAwait(false);
@@ -662,7 +734,7 @@ public sealed class SessionCoordinator
 
         if (active is not null)
         {
-            await active.Completion.WaitAsync(cancellationToken).ConfigureAwait(false);
+            await active.WaitForVisiblePauseOrCompletionAsync(cancellationToken).ConfigureAwait(false);
         }
 
         return await BuildSnapshotAsync(session, cancellationToken).ConfigureAwait(false);
@@ -1437,6 +1509,14 @@ public sealed class SessionCoordinator
 
         using var progressSubscription = applicationSearchProgress.Observe((progress, reportCancellation) =>
             PublishApplicationSearchProgressAsync(running.Id, operationId, progress, cancellationToken, reportCancellation));
+        using var consentSubscription = visualSearchConsent.Observe((request, requestCancellation) =>
+            RequestVisualSearchConsentAsync(running.Id, operationId, plan, request,
+                cancellationToken, requestCancellation));
+        using var desktopTaskSubscription = desktopTaskInteractions.Observe(
+            (request, requestCancellation) => RequestDesktopTaskConsentAsync(running.Id, operationId, plan,
+                request, cancellationToken, requestCancellation),
+            (description, reportCancellation) => PublishDesktopTaskProgressAsync(running.Id, operationId,
+                description, cancellationToken, reportCancellation));
         var result = await assistantCommands.ExecuteAsync(
                 new ExecuteAssistantCommandRequestDto(
                     plan.PlanId,
@@ -1463,6 +1543,9 @@ public sealed class SessionCoordinator
             return;
         }
 
+        await using var desktopTaskCompletionGate = plan.IntentKind == "DesktopTask"
+            ? await operationGates.AcquireTurnAsync(running.Id, CancellationToken.None).ConfigureAwait(false) : null;
+        if (plan.IntentKind == "DesktopTask") cancellationToken.ThrowIfCancellationRequested();
         var succeeded = string.Equals(result.Status, "Completed", StringComparison.OrdinalIgnoreCase);
         await TransitionAsync(
                 running.Id,
@@ -1476,6 +1559,132 @@ public sealed class SessionCoordinator
                 },
                 CancellationToken.None)
             .ConfigureAwait(false);
+    }
+
+    private async Task RequestVisualSearchConsentAsync(Guid turnId, string operationId,
+        AssistantIntentPlanDto plan, VisualSearchConsentRequest request,
+        CancellationToken operationCancellation, CancellationToken requestCancellation)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(operationCancellation, requestCancellation);
+        PendingVisualSearchConsent pending;
+        ActiveSessionWork active;
+        await using (var gate = await operationGates.AcquireTurnAsync(turnId, linked.Token).ConfigureAwait(false))
+        {
+            linked.Token.ThrowIfCancellationRequested();
+            var current = await sessionStore.GetTurnAsync(turnId, linked.Token).ConfigureAwait(false)
+                ?? throw new UnauthorizedAccessException("视觉搜索缺少当前会话请求。");
+            var session = await sessionStore.GetSessionAsync(current.SessionId, linked.Token).ConfigureAwait(false);
+            if (session?.IsCurrent != true || current.Phase != SessionTurnPhase.Executing
+                || current.CancellationRequested || current.OperationId != operationId
+                || current.PlanTarget != plan.CanonicalTarget || current.IntentKind != plan.IntentKind
+                || !MatchesPlannedExpectation(current)
+                || !_activeWork.TryGetValue(turnId, out active!)
+                || !VisualSearchQueryMatches(plan, request.Query))
+                throw new UnauthorizedAccessException("视觉搜索与本次明确确认的应用、搜索内容或执行范围不一致。");
+            var isResultRead = request.Purpose == VisualSearchConsentPurpose.ResultRead;
+            if (isResultRead)
+            {
+                if (active.VisualConsent is not { Request.Purpose: VisualSearchConsentPurpose.Search } original
+                    || !original.Completion.Task.IsCompletedSuccessfully
+                    || original.Request.Query != request.Query
+                    || !WindowIdentityContract.Matches(original.Request.Window, request.OriginWindow)
+                    || !MatchesPersistedWindowIdentity(current, request.OriginWindow))
+                    throw new UnauthorizedAccessException("临时窗口读取必须继续同一次已允许的搜索，且只能请求一次。");
+            }
+            else if (active.VisualConsent is not null)
+                throw new UnauthorizedAccessException("本次搜索许可已经使用，不能重复执行搜索。");
+            VerifyVisualSearchWindows(request);
+            if (current.IntentKind == nameof(UniversalIntentKind.SearchForeground)
+                && !MatchesPersistedWindowIdentity(current, request.OriginWindow))
+                throw new WindowIdentityException(WindowIdentityErrorCodes.Changed, "本次搜索窗口已经变化。");
+
+            pending = new(Guid.NewGuid(), request, plan.CanonicalTarget!, operationId,
+                timeProvider.GetUtcNow().AddMinutes(2), current.Version + 1);
+            active.VisualConsent = pending;
+            var origin = request.OriginWindow;
+            var summary = isResultRead
+                ? $"已输入“{request.Query}”。“{origin.WindowTitle}”出现了一个直属临时窗口（{pending.DisplayName}），是否允许元枢仅在本机查看这个窗口，核对本次搜索结果？不会点击、输入、打开结果、保存截图或发送画面到云端。许可仅限这一次核对，停止、窗口变化或元枢退出后失效。"
+                : $"允许元枢仅在本机查看“{origin.WindowTitle}”这个窗口，识别并点击搜索框，输入“{request.Query}”并核对结果？不会打开结果、发送消息、保存截图或发送画面到云端。许可仅限这次搜索，停止、窗口变化或元枢退出后失效。";
+            var waiting = await TransitionAsync(turnId, value => value with
+            {
+                Phase = SessionTurnPhase.WaitingForWindowConsent,
+                MissingContext = SessionMissingContext.WindowConsent,
+                WindowHandle = origin.WindowHandle,
+                WindowTitle = origin.WindowTitle,
+                WindowProcessName = origin.ProcessName,
+                WindowProcessId = origin.ProcessId,
+                WindowProcessStartTimeUtc = origin.ProcessStartTimeUtc,
+                RequiresConfirmation = true,
+                ConfirmationGranted = false,
+                ResultSummary = summary,
+                FailureCode = "visual_search_consent_required",
+                FailureMessage = null
+            }, linked.Token).ConfigureAwait(false);
+            if (waiting.Phase != SessionTurnPhase.WaitingForWindowConsent || waiting.Version != pending.TurnVersion)
+                throw new OperationCanceledException(linked.Token);
+            active.VisiblePause.TrySetResult();
+        }
+
+        // Keep the original execution and its already registered Command alive. No frame
+        // is captured while this task waits, and cancellation unblocks it immediately.
+        await pending.Completion.Task.WaitAsync(TimeSpan.FromMinutes(2), linked.Token).ConfigureAwait(false);
+        linked.Token.ThrowIfCancellationRequested();
+        var resumed = await sessionStore.GetTurnAsync(turnId, linked.Token).ConfigureAwait(false);
+        if (resumed is null || resumed.Phase != SessionTurnPhase.Executing || resumed.CancellationRequested
+            || resumed.OperationId != operationId || resumed.PlanTarget != pending.PlanTarget
+            || !resumed.ConfirmationGranted || !ReferenceEquals(active.VisualConsent, pending))
+            throw new UnauthorizedAccessException("本次视觉搜索许可已撤销。");
+        VerifyVisualSearchWindows(request);
+    }
+
+    private void VerifyVisualSearchWindows(VisualSearchConsentRequest request)
+    {
+        WindowIdentityContract.RequireMatch(request.OriginWindow,
+            foregroundWindows.ResolveWindow(request.OriginWindow.WindowHandle));
+        if (request.Purpose == VisualSearchConsentPurpose.ResultRead)
+        {
+            if (visualSearchResultWindows is null || request.Window.WindowHandle == request.OriginWindow.WindowHandle)
+                throw new UnauthorizedAccessException("没有可核对的直属临时窗口，不能读取其他窗口。");
+            visualSearchResultWindows.Verify(request.OriginWindow, request.Window);
+        }
+        else WindowIdentityContract.RequireMatch(request.OriginWindow, request.Window);
+    }
+
+    internal SessionWindowConsentDto? GetWindowConsent(SessionTurnRecord turn)
+    {
+        if (GetDesktopTaskConsent(turn) is { } taskConsent) return taskConsent;
+        if (turn.Phase != SessionTurnPhase.WaitingForWindowConsent
+            || turn.FailureCode != "visual_search_consent_required"
+            || !_activeWork.TryGetValue(turn.Id, out var active)
+            || active.Cancellation.IsCancellationRequested || active.VisualConsent is not { } pending
+            || turn.Version != pending.TurnVersion || turn.OperationId != pending.OperationId
+            || turn.PlanTarget != pending.PlanTarget) return null;
+        return new(pending.ConsentId, pending.Request.Purpose.ToString(), pending.Request.Window.WindowHandle,
+            pending.DisplayName);
+    }
+
+    private static bool VisualSearchQueryMatches(AssistantIntentPlanDto plan, string query)
+    {
+        if (query != DesktopSearchQuery.NormalizeAndValidate(query)) return false;
+        if (plan.IntentKind == nameof(UniversalIntentKind.SearchForeground))
+            return string.Equals(plan.CanonicalTarget, query, StringComparison.Ordinal);
+        if (plan.IntentKind != nameof(UniversalIntentKind.ApplicationSearch) || plan.CanonicalTarget is null)
+            return false;
+        try
+        {
+            using var document = JsonDocument.Parse(plan.CanonicalTarget);
+            var root = document.RootElement;
+            return root.GetProperty("query").GetString() == query
+                && root.GetProperty("followUp").GetString() == nameof(ApplicationSearchFollowUp.None)
+                && !root.TryGetProperty("latestMusicArtist", out _)
+                && !root.TryGetProperty("musicChart", out _)
+                && !string.IsNullOrWhiteSpace(root.GetProperty("applicationId").GetString())
+                && root.GetProperty("applicationTargetBinding").GetString() is { Length: 64 };
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException or KeyNotFoundException)
+        {
+            return false;
+        }
     }
 
     private async Task PublishApplicationSearchProgressAsync(Guid turnId, string operationId,
@@ -1497,6 +1706,8 @@ public sealed class SessionCoordinator
             ApplicationSearchStage.Opening => $"正在打开{application}…",
             ApplicationSearchStage.Opened => $"已打开{application}，准备搜索…",
             ApplicationSearchStage.ResolvingMusic => "正在查找最近发行的歌曲…",
+            ApplicationSearchStage.ResolvingHotMusic => "正在读取网易云热歌榜…",
+            ApplicationSearchStage.PlayingMusic => "正在播放并核对歌曲…",
             ApplicationSearchStage.PreparingSearch => "正在准备搜索框…",
             ApplicationSearchStage.Searching => "正在搜索…",
             ApplicationSearchStage.VerifyingResults => "正在检查搜索结果…",
@@ -1703,7 +1914,7 @@ public sealed class SessionCoordinator
                 return;
             }
 
-            var prompt = prompts.GetRequired("chat.general", "2", providerId);
+            var prompt = prompts.GetRequired("chat.general", RoutedConversationProvider.ChatPromptVersion, providerId);
             var request = new MemoryOutboundPreparationRequest(
                 projections.CoordinatorInstanceGuid,
                 session.Id,
@@ -1848,7 +2059,7 @@ public sealed class SessionCoordinator
 
         try
         {
-            var prompt = prompts.GetRequired("chat.general", "2", providerId);
+            var prompt = prompts.GetRequired("chat.general", RoutedConversationProvider.ChatPromptVersion, providerId);
             return string.Equals(
                     MemoryOutboundContract.NormalizeHttpsOrigin(destination),
                     prepared.DestinationOrigin,
@@ -2683,7 +2894,7 @@ public sealed class SessionCoordinator
                 (SessionTurnPhase.WaitingForFile, SessionMissingContext.File),
             UniversalIntentKind.DescribeForeground when plan.ForegroundApplication is not null =>
                 (SessionTurnPhase.WaitingForWindowConsent, SessionMissingContext.WindowConsent),
-            UniversalIntentKind.DescribeForeground or UniversalIntentKind.SearchForeground =>
+            UniversalIntentKind.DescribeForeground or UniversalIntentKind.SearchForeground or UniversalIntentKind.DesktopTask =>
                 (SessionTurnPhase.WaitingForWindow, SessionMissingContext.Window),
             _ => (SessionTurnPhase.Failed, SessionMissingContext.None)
         };
@@ -2902,7 +3113,7 @@ public sealed class SessionCoordinator
 
         try
         {
-            var prompt = prompts.GetRequired("chat.general", "2", providerId);
+            var prompt = prompts.GetRequired("chat.general", RoutedConversationProvider.ChatPromptVersion, providerId);
             return string.Equals(
                     MemoryOutboundContract.NormalizeHttpsOrigin(destination),
                     prepared.DestinationOrigin,
@@ -3087,6 +3298,7 @@ public sealed class SessionCoordinator
 
     private static string FriendlyException(Exception exception) => exception switch
     {
+        DesktopTaskException task => task.Message,
         ApplicationSearchWorkflowException or DesktopSearchException
             or InstalledApplicationResolutionException or WindowIdentityException =>
                 DesktopApiErrors.FromException(exception).UserMessage,
@@ -3097,11 +3309,20 @@ public sealed class SessionCoordinator
 
     private static string FriendlyExceptionCode(Exception exception, string fallback) => exception switch
     {
+        DesktopTaskException task => task.Code,
         ApplicationSearchWorkflowException or DesktopSearchException
             or InstalledApplicationResolutionException or WindowIdentityException =>
                 DesktopApiErrors.FromException(exception).Code,
         _ => fallback
     };
+
+    private sealed record PendingVisualSearchConsent(Guid ConsentId, VisualSearchConsentRequest Request, string PlanTarget,
+        string OperationId, DateTimeOffset ExpiresAtUtc, long TurnVersion)
+    {
+        public TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public string DisplayName => string.IsNullOrWhiteSpace(Request.Window.WindowTitle)
+            ? $"{Request.OriginWindow.WindowTitle}的临时窗口" : Request.Window.WindowTitle;
+    }
 
     private sealed class ActiveSessionWork(Guid turnId)
     {
@@ -3112,9 +3333,21 @@ public sealed class SessionCoordinator
 
         public CancellationTokenSource Cancellation { get; } = new();
 
+        public TaskCompletionSource VisiblePause { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public PendingVisualSearchConsent? VisualConsent { get; set; }
+        public PendingDesktopTaskConsent? DesktopTaskConsent { get; set; }
+
         public Task Completion => _completion.Task.Unwrap();
 
         public void SetCompletion(Task completion) => _completion.TrySetResult(completion);
+
+        public async Task WaitForVisiblePauseOrCompletionAsync(CancellationToken cancellationToken)
+        {
+            var completed = Completion;
+            var reached = await Task.WhenAny(completed, VisiblePause.Task).WaitAsync(cancellationToken).ConfigureAwait(false);
+            await reached.ConfigureAwait(false);
+        }
     }
 
     private sealed class ActiveTaskMonitor(Guid turnId, Guid taskId)

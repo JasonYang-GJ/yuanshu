@@ -117,6 +117,10 @@ impl ProjectionIdentity {
         })
     }
 
+    fn permits_heartbeat(&self, instance: &str) -> bool {
+        self.latest.as_ref().is_some_and(|current| current.instance_id == instance)
+    }
+
     fn permits_command(&self, instance: &str, token: &str) -> bool {
         self.latest.as_ref().is_some_and(|current| {
             current.instance_id == instance && current.control_token == token
@@ -204,6 +208,29 @@ pub async fn assistant_read(
 }
 
 #[tauri::command]
+pub async fn assistant_heartbeat(
+    window: WebviewWindow,
+    state: State<'_, AssistantBridge>,
+    instance_id: String,
+) -> Result<AssistantResponse, String> {
+    let Some(pipe) = state.pipe.clone() else {
+        return Ok(AssistantResponse::failure("unavailable"));
+    };
+    if window.label() != "main" || !valid_uuid(&instance_id) {
+        return Ok(AssistantResponse::failure("invalid_request"));
+    }
+    // JS supplies only the instance. Native visibility never proves that any
+    // particular text revision was displayed and carries no revision/authority.
+    let visible = window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(true);
+    Ok(exchange_async(
+        pipe,
+        Arc::clone(&state.identity),
+        Operation::Heartbeat { instance_id, visible },
+    )
+    .await)
+}
+
+#[tauri::command]
 pub async fn assistant_presented(
     window: WebviewWindow,
     state: State<'_, AssistantBridge>,
@@ -262,6 +289,10 @@ pub async fn assistant_command(
 
 enum Operation {
     Snapshot,
+    Heartbeat {
+        instance_id: String,
+        visible: bool,
+    },
     Presented {
         instance_id: String,
         revision: u64,
@@ -295,6 +326,14 @@ async fn exchange_async(
         };
         match &operation {
             Operation::Snapshot => {}
+            Operation::Heartbeat { instance_id, visible } => {
+                if !state.permits_heartbeat(instance_id) {
+                    return AssistantResponse::failure("instance_mismatch");
+                }
+                request.operation = "heartbeat";
+                request.instance_id = Some(instance_id);
+                request.visible = Some(*visible);
+            }
             Operation::Presented {
                 instance_id,
                 revision,
@@ -323,7 +362,9 @@ async fn exchange_async(
             }
         }
         let response = match exchange(&pipe, &request, REQUEST_TIMEOUT)
-            .and_then(|bytes| decode_response(&bytes))
+            .and_then(|bytes| if matches!(operation, Operation::Heartbeat { .. }) {
+                decode_heartbeat_response(&bytes)
+            } else { decode_response(&bytes) })
         {
             Ok(value) => value,
             Err(error) => return AssistantResponse::failure(error),
@@ -392,12 +433,21 @@ fn valid_snapshot(snapshot: &AssistantSnapshot) -> bool {
 }
 
 fn decode_response(bytes: &[u8]) -> Result<AssistantResponse, &'static str> {
+    decode_response_kind(bytes, false)
+}
+
+fn decode_heartbeat_response(bytes: &[u8]) -> Result<AssistantResponse, &'static str> {
+    decode_response_kind(bytes, true)
+}
+
+fn decode_response_kind(bytes: &[u8], heartbeat: bool) -> Result<AssistantResponse, &'static str> {
     if bytes.is_empty() || bytes.len() > FRAME_LIMIT {
         return Err("invalid_response");
     }
     let response: AssistantResponse =
         serde_json::from_slice(bytes).map_err(|_| "invalid_response")?;
-    if (response.ok && (response.error.is_some() || response.snapshot.is_none()))
+    if (heartbeat && response.snapshot.is_some())
+        || (response.ok && (response.error.is_some() || !heartbeat && response.snapshot.is_none()))
         || (!response.ok
             && response.error.as_deref().is_none_or(|error| {
                 error.is_empty()
@@ -835,6 +885,88 @@ mod tests {
         let mut body = vec![0; u32::from_le_bytes(header) as usize];
         file.read_exact(&mut body).unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    #[test]
+    fn native_heartbeat_has_no_revision_or_control_authority() {
+        for visible in [true, false] {
+            let initial = snapshot();
+            let instance = initial.instance_id.clone();
+            let expected_instance = instance.clone();
+            let identity = Arc::new(Mutex::new(ProjectionIdentity::default()));
+            identity.lock().unwrap().accept(&initial).unwrap();
+            let (pipe, worker) = pipe_server(move |mut file| {
+                assert_eq!(receive_request(&mut file), json!({
+                    "protocolVersion":1,"operation":"heartbeat","instanceId":expected_instance,"visible":visible
+                }));
+                let response = br#"{"ok":true,"error":null,"snapshot":null}"#;
+                file.write_all(&(response.len() as u32).to_le_bytes()).unwrap();
+                file.write_all(response).unwrap();
+                let mut trailing = [0; 1];
+                let _ = file.read(&mut trailing);
+            });
+            let response = tauri::async_runtime::block_on(exchange_async(pipe, Arc::clone(&identity),
+                Operation::Heartbeat { instance_id: instance, visible }));
+            assert!(response.ok);
+            assert!(response.snapshot.is_none());
+            let state = identity.lock().unwrap();
+            assert_eq!(state.latest.as_ref(), Some(&initial));
+            assert!(!state.permits_presentation(&initial.instance_id, initial.revision + 1));
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn heartbeat_rejects_missing_or_changed_instance_before_transport() {
+        let initial = snapshot();
+        let identity = Arc::new(Mutex::new(ProjectionIdentity::default()));
+        for known in [false, true] {
+            if known { identity.lock().unwrap().accept(&initial).unwrap(); }
+            let instance_id = if known { initial.control_token.clone() } else { initial.instance_id.clone() };
+            let response = tauri::async_runtime::block_on(exchange_async("unused-no-server".into(),
+                Arc::clone(&identity), Operation::Heartbeat { instance_id, visible: true }));
+            assert!(!response.ok);
+            assert_eq!(response.error.as_deref(), Some("instance_mismatch"));
+        }
+    }
+
+    #[test]
+    fn heartbeat_response_requires_an_exact_empty_receipt() {
+        assert!(decode_heartbeat_response(br#"{"ok":true,"error":null,"snapshot":null}"#).unwrap().ok);
+        assert!(!decode_heartbeat_response(br#"{"ok":false,"error":"presentation_required","snapshot":null}"#).unwrap().ok);
+        for invalid in [
+            json!({"ok":true,"error":null,"snapshot":snapshot()}),
+            json!({"ok":false,"error":"busy","snapshot":snapshot()}),
+            json!({"ok":true,"snapshot":null}),
+            json!({"ok":true,"error":null}),
+            json!({"ok":false,"error":null,"snapshot":null}),
+            json!({"ok":true,"error":null,"snapshot":null,"revision":4}),
+        ] {
+            assert!(decode_heartbeat_response(&serde_json::to_vec(&invalid).unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn heartbeat_response_cannot_register_an_unread_revision() {
+        let initial = snapshot();
+        let mut newer = initial.clone();
+        newer.revision += 1;
+        let identity = Arc::new(Mutex::new(ProjectionIdentity::default()));
+        identity.lock().unwrap().accept(&initial).unwrap();
+        let (pipe, worker) = pipe_server(move |mut file| {
+            assert_eq!(receive_request(&mut file)["operation"], "heartbeat");
+            let response = serde_json::to_vec(&json!({"ok":true,"error":null,"snapshot":newer})).unwrap();
+            file.write_all(&(response.len() as u32).to_le_bytes()).unwrap();
+            file.write_all(&response).unwrap();
+            let mut trailing = [0; 1];
+            let _ = file.read(&mut trailing);
+        });
+        let response = tauri::async_runtime::block_on(exchange_async(pipe, Arc::clone(&identity),
+            Operation::Heartbeat { instance_id: initial.instance_id.clone(), visible: true }));
+        assert!(!response.ok);
+        assert_eq!(response.error.as_deref(), Some("invalid_response"));
+        assert_eq!(identity.lock().unwrap().latest.as_ref(), Some(&initial));
+        worker.join().unwrap();
     }
 
     #[test]

@@ -2,6 +2,10 @@
 
 ## Product boundary
 
+On 2026-11-05 the owner additionally authorized visual recognition and computer interaction for software without verified structured controls. The visual desktop-task batch may capture only the explicitly bound foreground window after visible task-specific image-disclosure consent, use the frozen vision-capable model to propose bounded image-local targets, and perform separately confirmed pointer/text steps with fresh window/geometry/pixel validation. It must not infer authority from images or model output, inherit consent across windows, run arbitrary keyboard shortcuts/scripts, or persist captured images. This authorization supersedes the older no-pointer boundary only within this batch; see `docs/VISUAL_DESKTOP_TASKS.md` for implementation and acceptance status.
+
+The owner explicitly authorized general voice-driven software tasks on 2026-11-04. The new desktop-task batch may run a bounded observe/plan/act/verify loop over identified controls in an explicitly selected application or current window. One explicit task authorizes its ordinary steps within that bound scope; it does not authorize unrelated tasks, arbitrary scripts, or other windows. Window-content disclosure to the frozen model route requires visible task-specific consent. Sensitive or uncertain writes require separate visible step confirmation. Stop/replacement/restart must prevent later steps. See `docs/GENERAL_DESKTOP_TASKS.md` for the current batch specification and acceptance status. The narrower paragraph below records the earlier learning-assistant baseline and does not prohibit this explicitly authorized batch.
+
 Build a Windows learning assistant that follows the foreground app at question time and gives step-by-step Chinese guidance. The guarded action phase may execute a small allowlist of explicit user voice commands: open a known application or website, or fill and submit a reliably identified search box. It must not move the pointer or invoke destructive actions.
 
 ## Privacy and security

@@ -70,6 +70,7 @@ pub fn run() {
         bridge::cancel_island_task,
         bridge::get_island_diagnostics,
         assistant::assistant_read,
+        assistant::assistant_heartbeat,
         assistant::assistant_presented,
         assistant::assistant_command,
         assistant_surface::assistant_surface_state,

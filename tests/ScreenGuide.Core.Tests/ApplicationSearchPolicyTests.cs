@@ -11,6 +11,53 @@ public sealed class ApplicationSearchPolicyTests
         new HashSet<string> { "desktop.application.search" });
 
     [Fact]
+    public void LiteralSearchScopeCannotExpandIntoHotChartSelection()
+    {
+        var request = Request(new("music", "热门歌曲"));
+        var input = System.Text.Json.Nodes.JsonNode.Parse(request.InputJson)!;
+        input["ApplicationSearch"]!["MusicChart"] = "NetEaseHotChart";
+        request = request with { InputJson = input.ToJsonString() };
+        Assert.Equal("resource_scope_required", new CapabilityPolicyEngine().Evaluate(Descriptor, request).Code);
+    }
+
+    [Fact]
+    public void ChartScopeIsBoundOnceAndDoesNotAlterOrdinaryCanonicalFormat()
+    {
+        var workflow = new ApplicationSearchWorkflow("music", "热门歌曲", ApplicationSearchFollowUp.PlayFirst,
+            MusicChart: ApplicationSearchWorkflow.NetEaseHotChart);
+        var policy = new CapabilityPolicyEngine();
+        var request = Request(workflow);
+        Assert.True(policy.AuthorizeOnce(Descriptor, request).IsAllowed);
+        Assert.Equal("action_authorization_consumed", policy.AuthorizeOnce(Descriptor, request).Code);
+        using var canonical = JsonDocument.Parse(workflow.ToCanonicalTarget(Binding));
+        Assert.Equal("NetEaseHotChart", canonical.RootElement.GetProperty("musicChart").GetString());
+        Assert.Equal(5, canonical.RootElement.EnumerateObject().Count());
+        using var ordinary = JsonDocument.Parse((workflow with { MusicChart = null }).ToCanonicalTarget(Binding));
+        Assert.Equal(4, ordinary.RootElement.EnumerateObject().Count());
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("OtherChart")]
+    [InlineData("neteasehotchart")]
+    public void ChartScopeCannotBeRemovedOrChanged(string? replacement)
+    {
+        var workflow = new ApplicationSearchWorkflow("music", "热门歌曲", MusicChart: ApplicationSearchWorkflow.NetEaseHotChart);
+        var request = Request(workflow);
+        var changed = workflow with { MusicChart = replacement };
+        request = request with { InputJson = Input(changed, Binding, changed.ApplicationId, changed.Query, "SearchApplication") };
+        Assert.Equal("resource_scope_required", new CapabilityPolicyEngine().Evaluate(Descriptor, request).Code);
+    }
+
+    [Fact]
+    public void ChartCannotBeCombinedWithReleaseSelectionOrOpenFollowUp()
+    {
+        var workflow = new ApplicationSearchWorkflow("music", "热门歌曲", MusicChart: ApplicationSearchWorkflow.NetEaseHotChart);
+        Assert.Throws<ArgumentException>(() => (workflow with { LatestMusicArtist = "测试歌手" }).Validate());
+        Assert.Throws<ArgumentException>(() => (workflow with { FollowUp = ApplicationSearchFollowUp.OpenFirst }).Validate());
+    }
+
+    [Fact]
     public void LiteralSearchAuthorizationCannotBeExpandedIntoLatestMusicLookup()
     {
         var workflow = new ApplicationSearchWorkflow("music", "周杰伦最新的歌");

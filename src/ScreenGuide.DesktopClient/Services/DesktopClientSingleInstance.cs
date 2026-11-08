@@ -5,13 +5,17 @@ using ScreenGuide.DesktopProtocol;
 
 namespace ScreenGuide.DesktopClient.Services;
 
+public sealed record DesktopActivationRequest(bool ShowManagement, bool StartListening);
+
 public sealed class DesktopClientSingleInstance : IDisposable
 {
+    private readonly object _activationSync = new();
     private readonly Mutex _mutex;
     private readonly CancellationTokenSource _stopping = new();
     private readonly string _activationPipe;
     private Task? _listener;
-    private Action<bool>? _activationHandler;
+    private Action<DesktopActivationRequest>? _activationHandler;
+    private DesktopActivationRequest? _pendingActivation;
 
     private DesktopClientSingleInstance(Mutex mutex)
     {
@@ -40,11 +44,24 @@ public sealed class DesktopClientSingleInstance : IDisposable
         return new DesktopClientSingleInstance(mutex);
     }
 
-    public void SetActivationHandler(Action<bool> handler) => _activationHandler = handler;
-    public void SetActivationHandler(Action handler) => _activationHandler = _ => handler();
+    public void SetActivationRequestHandler(Action<DesktopActivationRequest> handler)
+    {
+        DesktopActivationRequest? pending;
+        lock (_activationSync)
+        {
+            _activationHandler = handler;
+            pending = _pendingActivation;
+            _pendingActivation = null;
+        }
+        if (pending is not null) handler(pending);
+    }
+
+    public void SetActivationHandler(Action<bool> handler) =>
+        SetActivationRequestHandler(request => handler(request.ShowManagement));
+    public void SetActivationHandler(Action handler) => SetActivationRequestHandler(_ => handler());
 
     public static async Task<bool> TrySignalExistingAsync(
-        CancellationToken cancellationToken = default, bool showManagement = false)
+        CancellationToken cancellationToken = default, bool showManagement = false, bool startListening = false)
     {
         try
         {
@@ -54,7 +71,8 @@ public sealed class DesktopClientSingleInstance : IDisposable
                 PipeDirection.Out,
                 PipeOptions.Asynchronous);
             await pipe.ConnectAsync(1000, cancellationToken).ConfigureAwait(false);
-            await pipe.WriteAsync(new byte[] { showManagement ? (byte)2 : (byte)1 }, cancellationToken).ConfigureAwait(false);
+            // Legacy signals 1/2 remain non-capturing. Only an explicit voice activation uses 3.
+            await pipe.WriteAsync(new byte[] { showManagement ? (byte)2 : startListening ? (byte)3 : (byte)1 }, cancellationToken).ConfigureAwait(false);
             await pipe.FlushAsync(cancellationToken).ConfigureAwait(false);
             return true;
         }
@@ -87,7 +105,18 @@ public sealed class DesktopClientSingleInstance : IDisposable
                 var signal = new byte[1];
                 if (await pipe.ReadAsync(signal, cancellationToken).ConfigureAwait(false) > 0)
                 {
-                    if (signal[0] is 1 or 2) _activationHandler?.Invoke(signal[0] == 2);
+                    if (signal[0] is 1 or 2 or 3)
+                    {
+                        var request = new DesktopActivationRequest(signal[0] == 2, signal[0] == 3);
+                        Action<DesktopActivationRequest>? handler;
+                        lock (_activationSync)
+                        {
+                            handler = _activationHandler;
+                            // Startup may still be loading settings. Keep only the latest opening intent.
+                            if (handler is null) _pendingActivation = request;
+                        }
+                        handler?.Invoke(request);
+                    }
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
